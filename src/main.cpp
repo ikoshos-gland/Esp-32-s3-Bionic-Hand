@@ -181,7 +181,7 @@ void loop() {
 
   // Find highest confidence gesture (above threshold)
   this_predict = -1;
-  float max_confidence = 0.5;  // Threshold (TEMPORARILY LOWERED: 0.5 = 50%, normally 0.8 = 80%)
+  float max_confidence = 0.8;  // Threshold (TEMPORARILY LOWERED: 0.5 = 50%, normally 0.8 = 80%)
   for (int i = 0; i < 11; i++) {
     float prob = output->data.f[i];  // Direct Float32 access
     if (prob > max_confidence) {
