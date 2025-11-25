@@ -135,9 +135,9 @@ class TrainingPlotter:
     def load_image(self, movement_id):
         """Görseli güncelle"""
         try:
-            # Rest sırasında (ID 0) veya ID 99 durumunda 0.jpg göster
+            # Rest sırasında (ID 0) veya ID 99 durumunda 0.jpeg göster
             img_id = movement_id if movement_id < len(GESTURE_NAMES) else 0
-            img_path = os.path.join(IMAGES_DIR, f'{img_id}.jpg')
+            img_path = os.path.join(IMAGES_DIR, f'{img_id}.jpeg')
             
             if os.path.exists(img_path):
                 img = Image.open(img_path)
@@ -145,7 +145,7 @@ class TrainingPlotter:
                 self.ax_image.axis('off')
                 self.ax_image.imshow(img)
             else:
-                self.ax_image.text(0.5, 0.5, f'NO IMAGE\n{img_id}.jpg', ha='center')
+                self.ax_image.text(0.5, 0.5, f'NO IMAGE\n{img_id}.jpeg', ha='center')
 
             # Başlık güncelle
             ph = current_phase["phase"]
