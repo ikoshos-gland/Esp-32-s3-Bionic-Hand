@@ -4,6 +4,8 @@
 #include "model.h"
 //functions
 #include "functions.h"
+//Servo controller for robotic hand
+#include "servo_controller.h"
 
 //Tensorflow custom library for ESP32 (from lib folder)
 #include <TensorFlowLite_ESP32.h>
@@ -41,6 +43,9 @@ int confirmed_gesture = -1;            // Last confirmed stable gesture
 // Motion Locking: Prevent rapid re-detection after gesture confirmation
 #define MOTION_LOCK_MS 1000            // 1000ms cooldown after gesture detection
 unsigned long last_gesture_time = 0;   // Timestamp of last detected gesture (millis)
+
+// Servo Controller: Controls 6 servos for robotic hand gestures
+ServoController servoController;
 
 void setup() {
   Serial.begin(921600);
@@ -114,6 +119,12 @@ void setup() {
   input = interpreter->input(0);
   output = interpreter->output(0);
 
+  // Initialize servo controller (after TFLite to ensure memory allocation succeeds)
+  Serial.println("BOOT: Initializing servo controller...");
+  servoController.begin();
+  servoController.setHome();
+  Serial.println("✅ Servo controller initialized and moved to home position");
+
   Serial.println("Setup complete! Starting gesture classification...");
   Serial.println("==================================================");
   Serial.println();
@@ -170,7 +181,7 @@ void loop() {
 
   // Find highest confidence gesture (above threshold)
   this_predict = -1;
-  float max_confidence = 0.8;  // Threshold
+  float max_confidence = 0.5;  // Threshold (TEMPORARILY LOWERED: 0.5 = 50%, normally 0.8 = 80%)
   for (int i = 0; i < 11; i++) {
     float prob = output->data.f[i];  // Direct Float32 access
     if (prob > max_confidence) {
@@ -221,6 +232,9 @@ void loop() {
         Serial.print("/");
         Serial.print(DEBOUNCE_FRAMES);
         Serial.println(" frames]");
+
+        // Trigger servo movement for detected gesture
+        servoController.moveToGesture(this_predict);
 
         last_predict = this_predict;
 

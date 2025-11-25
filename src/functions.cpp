@@ -34,6 +34,12 @@
 #include <Arduino.h>
 #include <cmath>
 
+// Forward declaration of servo controller (only for real-time inference mode)
+#ifdef REAL_TIME_INFERENCE_MODE
+#include "servo_controller.h"
+extern ServoController servoController;
+#endif
+
 // TD4 thresholds in ADC units (NOT normalized values)
 // CHANGED: Using ADC units for raw signal processing (was 0.01 for normalized RMS)
 #define ZC_THRESHOLD_ADC  15.0f   // ADC units - reduces noise-induced crossings
@@ -194,6 +200,13 @@ float* prelim_collection() {
     raw_sensor_data[3][i] = (float)analogRead(pin_MW4);
     raw_sensor_data[4][i] = (float)analogRead(pin_MW5);
     raw_sensor_data[5][i] = (float)analogRead(pin_MW6);
+
+    // Update servos every 10 samples (~10ms interval) for smooth motion
+    #ifdef REAL_TIME_INFERENCE_MODE
+    if (i % 10 == 0) {
+      servoController.update();
+    }
+    #endif
 
     // REMOVED: Watchdog reset (watchdog disabled in main.cpp setup)
 
