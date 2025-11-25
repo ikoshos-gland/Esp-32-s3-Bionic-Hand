@@ -178,13 +178,14 @@ int compute_ssc(float data[], int len, float threshold) {
  * 3. Pass to feature extraction
  *
  * CHANGED: No longer uses RMS windows - collects raw ADC values directly
+ * FIXED: Reduced from 500 samples @ 2kHz to 250 samples @ 1kHz (matches documentation)
  *
  * @return Pointer to feature array (after full pipeline)
  */
 float* prelim_collection() {
   unsigned long next_sample_time = micros();
   
-  // Collect RAW_WINDOW_SIZE raw samples from all 6 sensors 
+  // Collect RAW_WINDOW_SIZE raw samples from all 6 sensors
   for (int i = 0; i < RAW_WINDOW_SIZE; i++) {
     // Read raw ADC values (0-4095 on ESP32 12-bit ADC)
     raw_sensor_data[0][i] = (float)analogRead(pin_MW1);
@@ -193,8 +194,10 @@ float* prelim_collection() {
     raw_sensor_data[3][i] = (float)analogRead(pin_MW4);
     raw_sensor_data[4][i] = (float)analogRead(pin_MW5);
     raw_sensor_data[5][i] = (float)analogRead(pin_MW6);
-    
-    // Maintain 1000Hz sampling rate (1000 microseconds = 1ms per sample)
+
+    // REMOVED: Watchdog reset (watchdog disabled in main.cpp setup)
+
+    // Maintain 1000Hz sampling rate (1000 microseconds = 1ms per sample) - FIXED from 2000Hz
     next_sample_time += 1000;
     while (micros() < next_sample_time) {
       delayMicroseconds(10);
@@ -287,7 +290,7 @@ float* extract_features_from_raw() {
     // This preserves amplitude differences between gestures
     // (Unlike per-window normalization which destroyed this information)
     mav = mav / ADC_MAX_GLOBAL;  // Normalize to [0,1]
-    wl = wl / (ADC_MAX_GLOBAL * RAW_WINDOW_SIZE);  // Normalize by theoretical max
+    wl = wl / ADC_MAX_GLOBAL;  // FIXED: Normalize by ADC range only (was dividing by RAW_WINDOW_SIZE too)
     
     // ZC and SSC are counts, optionally normalize if needed
     // For now, keep as raw counts (model can learn appropriate scaling)

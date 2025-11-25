@@ -21,9 +21,10 @@ Output: Used by scripts_ai/training_data_collection.py for model training
 #define pin_MW5 15  // GPIO 15 - ADC2_CH4
 #define pin_MW6 16  // GPIO 16 - ADC2_CH5
 
-// Sampling Configuration (1000 Hz - matches feature extraction)
-#define FREQUENCY 1000
-#define INTERVAL_US (1000000 / FREQUENCY)
+// Sampling Configuration (2000 Hz - high precision mode)
+#define FREQUENCY 2000
+// Calibrated interval: ESP32-S3 clock runs ~12.7% fast, so compensate
+#define INTERVAL_US 564  // Empirically calibrated to achieve 2000 Hz (500 * 1.127)
 
 unsigned long last_sample_time = 0;
 bool streaming = false;
@@ -89,6 +90,7 @@ void loop() {
     if (cmd == 'S') {
       streaming = true;
       packet_seq = 0;
+      last_sample_time = micros();  // Initialize to current time to prevent catch-up
       // Clear input buffer
       while (Serial.available()) Serial.read();
     } else if (cmd == 'E') {
@@ -100,7 +102,8 @@ void loop() {
   if (streaming) {
     unsigned long current_time = micros();
     if (current_time - last_sample_time >= INTERVAL_US) {
-      last_sample_time = current_time;
+      // Use += to prevent timing drift from execution overhead
+      last_sample_time += INTERVAL_US;
 
       readSensors();
       packet.seq = packet_seq++;

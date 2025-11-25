@@ -12,8 +12,8 @@
 
 // Raw data collection configuration
 // CHANGED: Using raw signal processing instead of RMS windows
-#define RAW_WINDOW_SIZE  250   // 250ms window for better responsiveness (250 samples at 1kHz)
-#define SAMPLING_FREQ    1000  // 1000 Hz sampling rate
+#define RAW_WINDOW_SIZE  250   // 250ms window (250 samples at 1kHz) - FIXED to match documentation
+#define SAMPLING_FREQ    1000  // 1000 Hz sampling rate - FIXED to match documentation
 
 // Global ADC normalization bounds (12-bit ADC on ESP32)
 // CRITICAL: Must match Python training pipeline normalization

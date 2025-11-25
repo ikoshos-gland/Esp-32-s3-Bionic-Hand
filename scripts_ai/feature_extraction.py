@@ -38,7 +38,7 @@ class TD4FeatureExtractor:
     def __init__(self,
                  window_size_ms: int = 250,
                  overlap_ms: int = 125,
-                 sampling_rate: int = 1000,
+                 sampling_rate: int = 2000,
                  zc_threshold_adc: float = 15.0,
                  ssc_threshold_adc: float = 15.0,
                  adc_max: float = 4095.0):
@@ -223,6 +223,10 @@ class TD4FeatureExtractor:
                                        label_column: str = 'Movement') -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """
         Extract TD4 features from a pandas DataFrame using sliding windows
+        
+        CRITICAL FIX: Filters HAZIRLIK at DataFrame level (BEFORE windowing)
+        1. Removes "HAZIRLIK" from 'Phase' column (raw data level)
+        2. Balances "Rest" class after windowing
 
         Args:
             df: DataFrame with EMG data
@@ -234,7 +238,36 @@ class TD4FeatureExtractor:
         """
         assert len(sensor_columns) == 6, f"Expected 6 EMG sensors, got {len(sensor_columns)}"
 
-        print(f"\nExtracting TD4 features from {len(df)} samples...")
+        print(f"\nProcessing DataFrame: {len(df)} raw samples...")
+
+        # ============================================================================
+        # STEP 1: FILTER HAZIRLIK DATA (BEFORE windowing!)
+        # ============================================================================
+        if 'Phase' in df.columns:
+            print(f"\n{'='*60}")
+            print("CLEANING DATA: Removing 'HAZIRLIK' (preparation) phase")
+            print(f"{'='*60}")
+            
+            initial_count = len(df)
+            
+            # Filter out rows where Phase contains 'HAZIRLIK' (case-insensitive)
+            df = df[~df['Phase'].str.upper().str.contains('HAZIRLIK', na=False)]
+            
+            # Also filter out 'PREPARATION' (English variant)
+            df = df[~df['Phase'].str.upper().str.contains('PREPARATION', na=False)]
+            
+            removed_count = initial_count - len(df)
+            print(f"  Removed {removed_count} raw samples (Phase='HAZIRLIK')")
+            print(f"  Remaining raw samples: {len(df)}")
+            print(f"{'='*60}\n")
+        else:
+            print("\n⚠️  WARNING: 'Phase' column not found. Skipping HAZIRLIK filtering!")
+            print("   This is OK if your data doesn't have preparation phases.\n")
+
+        # ============================================================================
+        # STEP 2: EXTRACT FEATURES FROM WINDOWS
+        # ============================================================================
+        print(f"Extracting windows from {len(df)} samples...")
         print(f"Sensors: {sensor_columns}")
 
         features_list = []
@@ -250,6 +283,9 @@ class TD4FeatureExtractor:
                 f'ssc_{sensor}'
             ])
 
+        # Reset index after filtering (CRITICAL!)
+        df = df.reset_index(drop=True)
+
         # Sliding window extraction
         n_windows = 0
         for start_idx in range(0, len(df) - self.window_samples + 1, self.hop_samples):
@@ -260,7 +296,10 @@ class TD4FeatureExtractor:
             window_data = window_df[sensor_columns].values
 
             # Get label (most common label in window)
-            window_label = window_df[label_column].mode()[0]
+            try:
+                window_label = window_df[label_column].mode()[0]
+            except IndexError:
+                continue  # Skip empty windows if any
 
             # Extract features
             window_features = self.extract_window_features(window_data, sensor_columns)
@@ -275,9 +314,78 @@ class TD4FeatureExtractor:
         features_array = np.array(features_list)
         labels_array = np.array(labels_list)
 
-        print(f"Extracted {n_windows} windows")
+        print(f"\nExtracted {n_windows} windows")
         print(f"Feature shape: {features_array.shape}")
+        
+        # ============================================================================
+        # STEP 3: BALANCE 'Rest' CLASS (AFTER windowing)
+        # ============================================================================
+        print(f"\n{'='*60}")
+        print("BALANCING CLASSES: Equalizing 'Rest' with other gestures")
+        print(f"{'='*60}")
+        
+        # Get class distribution
+        unique_labels, label_counts = np.unique(labels_array, return_counts=True)
+        
+        print(f"\nClass distribution (before balancing):")
+        for label, count in zip(unique_labels, label_counts):
+            percentage = (count / len(labels_array)) * 100
+            print(f"  {label}: {count} samples ({percentage:.1f}%)")
+        
+        # Find "Rest" class (could be in different formats)
+        rest_variants = ['Rest', 'REST', 'rest', 'Dinlenme', 'DINLENME']
+        rest_label = None
+        for variant in rest_variants:
+            if variant in unique_labels:
+                rest_label = variant
+                break
+        
+        if rest_label is not None:
+            # Calculate median count of non-Rest classes
+            non_rest_counts = [count for label, count in zip(unique_labels, label_counts) 
+                             if label != rest_label]
+            
+            if len(non_rest_counts) > 0:
+                # Target: 1.2x median of other classes (slight buffer is good)
+                target_count = int(np.median(non_rest_counts) * 1.2)
+                current_rest_count = label_counts[unique_labels == rest_label][0]
+                
+                print(f"\nBalancing '{rest_label}' class:")
+                print(f"  Current count: {current_rest_count}")
+                print(f"  Target count: ~{target_count} (1.2× median of others)")
+                
+                # Only downsample if Rest is actually dominant
+                if current_rest_count > target_count:
+                    # Get indices of Rest and non-Rest samples
+                    rest_indices = np.where(labels_array == rest_label)[0]
+                    non_rest_indices = np.where(labels_array != rest_label)[0]
+                    
+                    # Randomly subsample Rest class to target count
+                    np.random.seed(42)  # For reproducibility
+                    rest_indices_sampled = np.random.choice(rest_indices, target_count, replace=False)
+                    
+                    # Combine sampled Rest with all non-Rest samples
+                    final_indices = np.concatenate([rest_indices_sampled, non_rest_indices])
+                    final_indices = np.sort(final_indices)
+                    
+                    features_array = features_array[final_indices]
+                    labels_array = labels_array[final_indices]
+                    
+                    print(f"  ✅ Downsampled '{rest_label}' from {current_rest_count} to {target_count}")
+                    print(f"  Total samples after balancing: {len(labels_array)}")
+                else:
+                    print(f"  ✅ '{rest_label}' already balanced (no downsampling needed)")
+        
+        # Show final class distribution
+        print(f"\nFinal Class Distribution:")
+        unique_labels_final, label_counts_final = np.unique(labels_array, return_counts=True)
+        for label, count in zip(unique_labels_final, label_counts_final):
+            percentage = (count / len(labels_array)) * 100
+            print(f"  {label}: {count} samples ({percentage:.1f}%)")
+        
+        print(f"\nFinal feature shape: {features_array.shape}")
         print(f"Total features per window: {len(feature_names)}")
+        print(f"{'='*60}\n")
 
         return features_array, labels_array, feature_names
 
@@ -314,7 +422,7 @@ class TD4FeatureExtractor:
 
 
 def extract_features_from_csv(csv_path: str,
-                              output_dir: str = 'data/features',
+                              output_dir: str = 'scripts_ai/data/features',
                               sensor_columns: List[str] = None) -> str:
     """
     Extract TD4 features from a CSV file and save to NPZ format
@@ -346,7 +454,7 @@ def extract_features_from_csv(csv_path: str,
     extractor = TD4FeatureExtractor(
         window_size_ms=250,
         overlap_ms=125,
-        sampling_rate=1000,
+        sampling_rate=2000,
         zc_threshold_adc=15.0,
         ssc_threshold_adc=15.0,
         adc_max=4095.0
@@ -404,7 +512,7 @@ if __name__ == "__main__":
     # Extract features
     output_path = extract_features_from_csv(
         csv_path,
-        output_dir='data/features',
+        output_dir='scripts_ai/data/features',
         sensor_columns=['EMG1', 'EMG2', 'EMG3', 'EMG4', 'EMG5', 'EMG6']
     )
 

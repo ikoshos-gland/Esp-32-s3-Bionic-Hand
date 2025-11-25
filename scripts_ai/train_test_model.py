@@ -60,20 +60,20 @@ DROPOUT_RATE_3 = 0.1
 # Early stopping
 EARLY_STOPPING_PATIENCE = 15
 
-# Paths
-MODELS_DIR = 'models/'
-PLOTS_DIR = 'plots/'
-FEATURES_DIR = 'data/features/'
+# Paths - Organized under scripts_ai/data/
+MODELS_DIR = 'scripts_ai/data/models/'
+PLOTS_DIR = 'scripts_ai/data/plots/'
+FEATURES_DIR = 'scripts_ai/data/features/'
 
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
 # Gesture mapping
-GESTURE_NAMES = [
-    'Rest', 'Fist', 'Open', 'Point', 'Victory', 'OK',
-    'ThumbUp', 'ThumbDn', 'Grasp', 'Pinch', 'WristFlex'
-]
-NUM_GESTURES = len(GESTURE_NAMES)
+# CRITICAL: Do NOT hardcode GESTURE_NAMES!
+# The list will be dynamically loaded from the NPZ file in alphabetical order
+# to match the one-hot encoding order. Hardcoding causes label mismatch!
+GESTURE_NAMES = None  # Will be populated in load_npz_features()
+NUM_GESTURES = None  # Will be populated in load_npz_features()
 
 
 # ============================================================================
@@ -101,6 +101,9 @@ def find_latest_features_npz():
 def load_npz_features(npz_path):
     """
     Load TD4 features from NPZ file
+    
+    UPDATED: Dynamically loads gesture names in ALPHABETICAL order
+    to match OneHotEncoder/to_categorical behavior and prevent label mismatch.
 
     Args:
         npz_path: Path to NPZ file
@@ -108,6 +111,8 @@ def load_npz_features(npz_path):
     Returns:
         Tuple of (features, labels, feature_names, num_classes)
     """
+    global GESTURE_NAMES, NUM_GESTURES
+    
     print(f"\n{'='*80}")
     print(f"Loading TD4 features from NPZ")
     print(f"{'='*80}\n")
@@ -125,14 +130,30 @@ def load_npz_features(npz_path):
     print(f"Number of features: {len(feature_names)}")
     print(f"Sensors: {sensor_columns}")
 
-    # Get unique classes
-    unique_labels = np.unique(labels)
+    # ============================================================================
+    # CRITICAL FIX: Dynamic gesture name loading
+    # ============================================================================
+    # Get unique classes and sort ALPHABETICALLY
+    # This matches the behavior of to_categorical and OneHotEncoder
+    unique_labels = sorted(np.unique(labels))
     num_classes = len(unique_labels)
+    
+    # Update global GESTURE_NAMES variable
+    GESTURE_NAMES = unique_labels
+    NUM_GESTURES = num_classes
+    
+    print(f"\n{'='*60}")
+    print(f"GESTURE NAMES (Alphabetically Sorted - Matches OneHot Encoding):")
+    print(f"{'='*60}")
+    for idx, label in enumerate(GESTURE_NAMES):
+        print(f"  [{idx}] {label}")
+    print(f"{'='*60}")
 
     print(f"\nClass distribution:")
     for label in unique_labels:
         count = np.sum(labels == label)
-        print(f"  {label}: {count} samples")
+        percentage = (count / len(labels)) * 100
+        print(f"  {label}: {count} samples ({percentage:.1f}%)")
 
     print(f"\nTotal classes: {num_classes}")
 
@@ -424,7 +445,7 @@ def plot_training_history(history, save_path):
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"  ✓ Saved training history: {save_path}")
+    print(f"  OK Saved training history: {save_path}")
 
 
 def plot_confusion_matrix(model, X_test, y_test, save_path):
@@ -455,49 +476,47 @@ def plot_confusion_matrix(model, X_test, y_test, save_path):
     plt.yticks(rotation=0)
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"  ✓ Saved confusion matrix: {save_path}")
+    print(f"  OK Saved confusion matrix: {save_path}")
 
     # Classification report
     print("\nClassification Report:")
-    print(classification_report(y_true, y_pred, target_names=GESTURE_NAMES))
+    # Get unique labels present in test set
+    unique_labels = sorted(set(y_true) | set(y_pred))
+    target_names_present = [GESTURE_NAMES[i] for i in unique_labels]
+    print(classification_report(y_true, y_pred, labels=unique_labels, target_names=target_names_present, zero_division=0))
 
 
 # ============================================================================
 # MODEL EXPORT
 # ============================================================================
 
-def convert_to_tflite_int8(model, X_train, output_path):
+def convert_to_tflite_float32(model, output_path):
     """
-    Convert model to TFLite with Post-Training Int8 Quantization
+    Convert model to TFLite with Float32 (NO quantization)
 
-    This reduces model size by ~75% and speeds up inference on ESP32.
+    This ensures maximum compatibility with older TFLite libraries on ESP32.
+    Model will be larger but more compatible.
 
     Args:
         model: Trained Keras model
-        X_train: Training data for representative dataset
         output_path: Path to save TFLite model
 
     Returns:
-        Size of quantized model in KB
+        Size of model in KB
     """
     print(f"\n{'='*80}")
-    print("Post-Training Int8 Quantization")
+    print("Converting to TFLite Float32 (No Quantization)")
     print(f"{'='*80}\n")
 
-    # Representative dataset generator
-    def representative_dataset():
-        for i in range(min(100, len(X_train))):
-            yield [X_train[i:i+1].astype(np.float32)]
-
-    # Convert to TFLite with quantization
+    # Convert to TFLite WITHOUT quantization
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
 
-    # Enable Int8 quantization
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.representative_dataset = representative_dataset
-    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    converter.inference_input_type = tf.int8
-    converter.inference_output_type = tf.int8
+    # NO quantization - use Float32 for maximum ESP32 compatibility
+    # This works with TFLite v2.1.1 on ESP32 without operator version issues
+    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+
+    # Float32 input/output (default, but explicit for clarity)
+    # No need to set inference_input_type or inference_output_type
 
     tflite_model = converter.convert()
 
@@ -507,9 +526,10 @@ def convert_to_tflite_int8(model, X_train, output_path):
 
     size_kb = len(tflite_model) / 1024
 
-    print(f"✓ Int8 quantized TFLite model saved: {output_path}")
+    print(f"✅ Float32 TFLite model saved: {output_path}")
     print(f"  Size: {size_kb:.2f} KB")
-    print(f"  Quantization: Int8 (75% size reduction)")
+    print(f"  Format: Float32 (no quantization)")
+    print(f"  Compatibility: TFLite v2.1.1+ (ESP32-S3)")
 
     return size_kb
 
@@ -545,7 +565,7 @@ def convert_to_c_header(tflite_path, output_path):
 //
 // Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 // Model size: {len(tflite_data)} bytes
-// Quantization: Int8
+// Format: Float32 (no quantization for TFLite v2.1.1 compatibility)
 // Input: 24 features (4 TD4 × 6 EMG sensors)
 // Output: {NUM_GESTURES} gestures
 
@@ -565,7 +585,7 @@ const unsigned int model_tflite_len = {len(tflite_data)};
     with open(output_path, 'w') as f:
         f.write(header_content)
 
-    print(f"✓ C header saved: {output_path}")
+    print(f"OK C header saved: {output_path}")
     print(f"  Array size: {len(tflite_data)} bytes")
     print(f"\n  Include in ESP32-S3 project:")
     print(f"    #include \"{os.path.basename(output_path)}\"")
@@ -638,14 +658,14 @@ def main():
     # Save Keras model
     keras_model_path = os.path.join(MODELS_DIR, f'mlp_td4_{timestamp}.keras')
     model.save(keras_model_path)
-    print(f"✓ Keras model saved: {keras_model_path}")
+    print(f"OK Keras model saved: {keras_model_path}")
 
-    # Convert to Int8 TFLite
-    tflite_path = os.path.join(MODELS_DIR, f'mlp_td4_{timestamp}_int8.tflite')
-    model_size_kb = convert_to_tflite_int8(model, X_train, tflite_path)
+    # Convert to Float32 TFLite (no quantization for ESP32 compatibility)
+    tflite_path = os.path.join(MODELS_DIR, f'mlp_td4_{timestamp}_float32.tflite')
+    model_size_kb = convert_to_tflite_float32(model, tflite_path)
 
     # Convert to C header
-    header_path = os.path.join(MODELS_DIR, f'mlp_td4_{timestamp}_int8.h')
+    header_path = os.path.join(MODELS_DIR, f'mlp_td4_{timestamp}_float32.h')
     convert_to_c_header(tflite_path, header_path)
 
     # Final summary
@@ -660,7 +680,7 @@ def main():
 
     print(f"\nGenerated Files:")
     print(f"  1. Keras model:     {keras_model_path}")
-    print(f"  2. TFLite (Int8):   {tflite_path} ({model_size_kb:.2f} KB)")
+    print(f"  2. TFLite (Float32): {tflite_path} ({model_size_kb:.2f} KB)")
     print(f"  3. C header:        {header_path}")
     print(f"  4. Training plots:  {PLOTS_DIR}")
 

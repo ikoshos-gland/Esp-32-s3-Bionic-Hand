@@ -35,7 +35,7 @@ def validate_dc_offset_removal():
 
     # Create test signal with known DC offset
     # Signal: 2048 ± 100 (oscillates around 2048)
-    test_signal = 2048 + 100 * np.sin(2 * np.pi * np.linspace(0, 1, 250))
+    test_signal = 2048 + 100 * np.sin(2 * np.pi * np.linspace(0, 1, 500))
 
     # Calculate mean (DC offset)
     mean_val = np.mean(test_signal)
@@ -106,16 +106,16 @@ def validate_td4_features():
 
     extractor = TD4FeatureExtractor(
         window_size_ms=250,
-        sampling_rate=1000,
+        sampling_rate=2000,
         zc_threshold_adc=15.0,
         ssc_threshold_adc=15.0,
         adc_max=4095.0
     )
 
     # Create centered signal (DC already removed, oscillates around 0)
-    centered_signal = 100 * np.sin(2 * np.pi * 5 * np.linspace(0, 0.25, 250))  # 5Hz, 250ms
+    centered_signal = 100 * np.sin(2 * np.pi * 5 * np.linspace(0, 0.25, 500))  # 5Hz, 250ms
 
-    print(f"   Test signal: 250 samples, 5Hz sine wave, amplitude ±100 ADC units")
+    print(f"   Test signal: 500 samples, 5Hz sine wave, amplitude ±100 ADC units")
     print(f"   Signal range: [{np.min(centered_signal):.2f}, {np.max(centered_signal):.2f}]")
     print(f"   Signal mean: {np.mean(centered_signal):.6f}")
 
@@ -191,7 +191,7 @@ def validate_full_pipeline(csv_path: str = None):
     extractor = TD4FeatureExtractor(
         window_size_ms=250,
         overlap_ms=0,  # No overlap for single-window test
-        sampling_rate=1000,
+        sampling_rate=2000,
         zc_threshold_adc=15.0,
         ssc_threshold_adc=15.0,
         adc_max=4095.0
@@ -259,7 +259,7 @@ def compare_with_cpp_expected():
     print("="*60)
 
     print("✅ Pipeline configuration matches C++:")
-    print("   - Window size: 250ms (250 samples @ 1000Hz) ✓")
+    print("   - Window size: 250ms (500 samples @ 2000Hz) ✓")
     print("   - DC offset removal: mean subtraction ✓")
     print("   - Signal type: bipolar (centered at 0) ✓")
     print("   - Normalization: GLOBAL (ADC_MAX = 4095) ✓")

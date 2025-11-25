@@ -12,8 +12,8 @@ ESP32-S3 (N16R8) - Biyonik El Projesi
 #define pin_MW2 5   // ADC1_CH4
 #define pin_MW3 6   // ADC1_CH5
 #define pin_MW4 7   // ADC1_CH6
-#define pin_MW5 15  // ADC2_CH4
-#define pin_MW6 16  // ADC2_CH5
+#define pin_MW5 8  // ADC2_CH4
+#define pin_MW6 9  // ADC2_CH5
 
 // Sampling Ayarları (Feature Extraction ile uyumlu 1000Hz)
 #define FREQUENCY 1000 

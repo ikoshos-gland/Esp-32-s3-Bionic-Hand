@@ -23,13 +23,14 @@ import serial.tools.list_ports
 # ==========================================
 # ESP32-S3 genelde yüksek baud rate ile sorunsuz çalışır
 BAUD = 921600
-# Otomatik port bulma aktif, elle girmek istersen: PORT = 'COMx'
-PORT = None 
+# COM11 - ESP32-S3 USB Serial Device
+PORT = 'COM11' 
 
 # Dosya Yolları
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
-IMAGES_DIR = os.path.join(PROJECT_ROOT, 'images_hand')
+# Ana proje root'una git, sonra scripts_ai/data/ altına kaydet
+PROJECT_ROOT_MAIN = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # real_time_esp322/
+DATA_DIR = os.path.join(PROJECT_ROOT_MAIN, 'scripts_ai', 'data')
+IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'images_hand')
 
 # Hareket Protokolü (Model eğitimiyle uyumlu)
 # Modelde 0: Rest, 1-10: Hareketler
@@ -152,7 +153,7 @@ class TrainingPlotter:
             rep = current_phase["rep"]
             t = current_phase["time_left"]
             
-            color = 'green' if ph == "HAREKET" else ('orange' if ph == "DİNLENME" else 'blue')
+            color = 'green' if ph == "HAREKET" else ('orange' if ph == "DINLENME" else 'blue')
             
             self.ax_image.set_title(
                 f"{ph}\n{name}\nTekrar: {rep}/{REPETITIONS}\nKalan: {t:.1f}s",
@@ -178,7 +179,7 @@ class TrainingPlotter:
 
         # Görsel güncelleme kontrolü
         mov_id = current_phase["movement_id"]
-        # Eğer faz "DİNLENME" ise, görsel olarak 0 (Rest) gösterelim
+        # Eğer faz "DINLENME" ise, görsel olarak 0 (Rest) gösterelim
         display_id = mov_id if current_phase["phase"] == "HAREKET" else 0
         
         # Sadece durum değiştiyse veya her 5 frame'de bir text güncelle
@@ -242,10 +243,10 @@ def read_serial_thread(ser):
                         if csv_writer:
                             # Model eğitimi için Label belirleme:
                             # HAREKET fazındaysak -> Hareketin ID'si (1-10)
-                            # DİNLENME fazındaysak -> 0 (Rest)
+                            # DINLENME fazındaysak -> 0 (Rest)
                             
                             label_name = current_phase["movement_name"]
-                            if current_phase["phase"] == "DİNLENME":
+                            if current_phase["phase"] == "DINLENME":
                                 label_name = "Rest"
                             
                             csv_writer.writerow([
@@ -273,7 +274,7 @@ def protocol_thread():
     current_phase.update({
         "movement_id": 0,
         "movement_name": "Rest",
-        "phase": "DİNLENME",
+        "phase": "DINLENME",
         "time_left": 5,
         "rep": 0
     })
@@ -301,11 +302,11 @@ def protocol_thread():
                 current_phase["time_left"] = MOVEMENT_DURATION - (time.time() - t_start)
                 time.sleep(0.1)
                 
-            # 2. DİNLENME FAZI (Veri = Rest Sınıfı)
+            # 2. DINLENME FAZI (Veri = Rest Sınıfı)
             current_phase.update({
                 "movement_id": movement_id, # Görselde kafa karışmasın diye ID kalabilir
                 "movement_name": mov_name,  # Ama CSV'ye "Rest" yazılacak (read_serial'da handle ediliyor)
-                "phase": "DİNLENME",
+                "phase": "DINLENME",
                 "rep": rep,
                 "time_left": REST_DURATION
             })

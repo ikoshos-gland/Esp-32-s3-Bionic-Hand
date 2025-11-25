@@ -24,24 +24,9 @@ TfLiteTensor* output = nullptr;
 
 // Create an area of memory for input, output, and intermediate arrays
 // TD4 features: 24 features (4 TD4 × 6 sensors) with Wide & Deep MLP
-// FIXED: Added 16-byte alignment as required by TensorFlow Lite
-// INCREASED: 30KB (was 20KB) for better safety margin
+// Float32 model (no quantization for TFLite v2.1.1 compatibility)
 constexpr int kTensorArenaSize = 30 * 1024;  // 30KB for TD4 + MLP
-alignas(16) uint8_t tensor_arena[kTensorArenaSize];  // ← 16-byte aligned
-
-// Helper: Safe Int8 clamping for quantization (prevents overflow)
-inline int8_t clamp_int8(float value) {
-  if (value > 127.0f) return 127;
-  if (value < -128.0f) return -128;
-  return (int8_t)value;
-}
-
-// Helper: Clamp probability to valid range [0.0, 1.0]
-inline float clamp_prob(float value) {
-  if (value > 1.0f) return 1.0f;
-  if (value < 0.0f) return 0.0f;
-  return value;
-}
+alignas(16) uint8_t tensor_arena[kTensorArenaSize];  // 16-byte aligned
 }  // namespace
 
 int this_predict = -1;
@@ -58,10 +43,17 @@ int confirmed_gesture = -1;            // Last confirmed stable gesture
 unsigned long last_gesture_time = 0;   // Timestamp of last detected gesture (millis)
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
+  Serial.println("BOOT: Serial started at 921600 baud");
   delay(1000);
+  Serial.println("BOOT: Delay complete, initializing...");
 
   Serial.println("\n\n=== STARTING SETUP ===");
+
+  // ADDED: Memory diagnostics to detect memory issues
+  Serial.printf("BOOT: Free heap: %d bytes (%.1f KB)\n", ESP.getFreeHeap(), ESP.getFreeHeap()/1024.0);
+  Serial.printf("BOOT: Free PSRAM: %d bytes (%.1f KB)\n", ESP.getFreePsram(), ESP.getFreePsram()/1024.0);
+  Serial.printf("BOOT: Tensor arena size: %d bytes (%d KB)\n", kTensorArenaSize, kTensorArenaSize/1024);
 
   // Configure ADC attenuation for 0-3.3V range (12-bit: 0-4095)
   // ESP32-S3 ADC defaults to 11dB attenuation (0-2500mV), we need full range
@@ -73,12 +65,21 @@ void setup() {
   error_reporter = &micro_error_reporter;
 
   // Map the model
+  Serial.println("BOOT: Loading TFLite model...");
   model = tflite::GetModel(model_tflite);
+  Serial.printf("BOOT: Model schema version: %d (expected: %d)\n",
+                model->version(), TFLITE_SCHEMA_VERSION);
+
   if (model->version() != TFLITE_SCHEMA_VERSION) {
     error_reporter->Report("Model schema mismatch!");
-    Serial.println("❌ FATAL: Model schema version mismatch - HALTING");
-    while(1) { delay(1000); }  // Halt execution
+    Serial.println("❌ FATAL: Model schema version mismatch");
+    Serial.println("   Device is HALTED - Press reset button to retry");
+    while(1) {
+      delay(1000);
+      Serial.print(".");  // Heartbeat shows device is alive but halted
+    }
   }
+  Serial.println("BOOT: Model loaded successfully");
 
   // Pull in all operations
   static tflite::ops::micro::AllOpsResolver resolver;
@@ -89,7 +90,10 @@ void setup() {
   interpreter = &static_interpreter;
 
   // Allocate tensors
+  Serial.println("BOOT: Allocating TensorFlow tensors...");
   TfLiteStatus allocate_status = interpreter->AllocateTensors();
+  Serial.printf("BOOT: AllocateTensors() status: %d (0=OK, other=FAIL)\n", allocate_status);
+
   if (allocate_status != kTfLiteOk) {
     error_reporter->Report("AllocateTensors() failed");
     Serial.println("❌ FATAL: TensorFlow Lite memory allocation failed");
@@ -98,9 +102,13 @@ void setup() {
     Serial.println("   - Model too large for tensor arena");
     Serial.println("   - Insufficient memory available");
     Serial.println("   - Increase kTensorArenaSize in main.cpp");
-    Serial.println("\n🛑 HALTING - Cannot continue without TFLite");
-    while(1) { delay(1000); }  // Halt execution - do not continue to loop()
+    Serial.println("\n🛑 Device HALTED - Press reset button to retry");
+    while(1) {
+      delay(1000);
+      Serial.print(".");  // Heartbeat shows device is alive but halted
+    }
   }
+  Serial.println("BOOT: Tensors allocated successfully");
 
   // Get input and output tensors
   input = interpreter->input(0);
@@ -111,26 +119,21 @@ void setup() {
   Serial.println();
   Serial.println("✅ TD4 Feature Extraction Active (Literature-Based)");
   Serial.printf("   Features: %d (4 TD4 × 6 EMG sensors)\n", NUM_FEATURES);
-  Serial.println("   Model: Wide & Deep MLP with Int8 Quantization");
+  Serial.println("   Model: Wide & Deep MLP (Float32 - No Quantization)");
   Serial.println("   TD4: MAV, WL, ZC, SSC (Hudgins et al.)");
-  Serial.println();
+  Serial.println("   TFLite: v2.1.1 compatible (SOFTMAX v1)");
 }
 
 
 
 void loop() {
-  // Get sensor features (Phase 1: 57 time-domain features)
+  // Get sensor features (24 TD4 features from 6 EMG sensors)
   float* features = prelim_collection();
 
   // Copy features into TFLite input tensor buffer
-  // FIXED: Proper Int8 quantization using TFLite parameters
-  // SAFETY: Clamp values to prevent overflow from sensor spikes/noise
-  // Model expects Int8 input, features are in [0.0, 1.0] range
+  // Float32 model - direct copy, no quantization needed
   for (int i = 0; i < NUM_FEATURES; i++) {
-    // Quantize: float → int8 using TFLite's quantization params
-    // Formula: quantized = (float_value / scale) + zero_point
-    float scaled = (features[i] / input->params.scale) + input->params.zero_point;
-    input->data.int8[i] = clamp_int8(scaled);  // SAFE: Prevents overflow [-128, 127]
+    input->data.f[i] = features[i];
   }
 
   // DEBUG: Display TD4 feature values
@@ -157,15 +160,10 @@ void loop() {
     return;
   }
 
-  // Display output (optimized compact format)
-  // FIXED: Proper Int8 dequantization using TFLite parameters
-  // SAFETY: Clamp probabilities to valid range [0.0, 1.0]
+  // Display output probabilities (Float32 - no dequantization needed)
   Serial.print("Probabilities: ");
   for(int i = 0; i < 11; i++) {
-    // Dequantize: int8 → float using TFLite's quantization params
-    // Formula: float_value = (quantized - zero_point) * scale
-    float prob = (output->data.int8[i] - output->params.zero_point) * output->params.scale;
-    prob = clamp_prob(prob);  // SAFE: Ensure [0.0, 1.0] range
+    float prob = output->data.f[i];  // Direct Float32 access
     Serial.printf("%.3f ", prob);
   }
   Serial.println();
@@ -174,10 +172,7 @@ void loop() {
   this_predict = -1;
   float max_confidence = 0.8;  // Threshold
   for (int i = 0; i < 11; i++) {
-    // FIXED: Dequantize int8 output before comparison
-    // SAFETY: Clamp to prevent invalid probability values
-    float prob = (output->data.int8[i] - output->params.zero_point) * output->params.scale;
-    prob = clamp_prob(prob);  // SAFE: Ensure [0.0, 1.0] range
+    float prob = output->data.f[i];  // Direct Float32 access
     if (prob > max_confidence) {
       max_confidence = prob;
       this_predict = i;
