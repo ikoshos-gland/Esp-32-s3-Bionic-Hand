@@ -10,7 +10,7 @@ import numpy as np
 from collections import deque
 from datetime import datetime
 
-# PyQt6 ve PyQtGraph (Modern Arayüz Kütüphaneleri)
+# PyQt6 ve Py QtGraph (Modern Arayüz Kütüphaneleri)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QComboBox, 
                              QProgressBar, QGroupBox, QGridLayout, QMessageBox)
@@ -156,12 +156,14 @@ class SerialWorker(QThread):
             self.csv_file = None
 
         # Terminale başarı mesajı yazdır
-        if hasattr(self, 'current_filename'):
+        if hasattr(self, 'current_filename') and self.current_filename is not None:
             print(f"\n{'='*60}")
             print(f"✅ KAYIT TAMAMLANDI")
             print(f"📂 Dosya: {self.current_filename}")
             print(f"📊 Dosya boyutu: {os.path.getsize(self.current_filename) / 1024:.2f} KB")
             print(f"{'='*60}\n")
+        else:
+            print("\n⚠️  Kayıt yapılmadı (dosya yok)")
 
         self.finished_saving.emit("Kayıt Tamamlandı")
 
@@ -398,17 +400,22 @@ class BionicHandGUI(QMainWindow):
             # 3 satır x 2 sütun düzeni
             row = i // 2
             col = i % 2
-            
+
             p = self.graphics_layout.addPlot(row=row, col=col)
-            p.setYRange(0, 4200) # ESP32 ADC Aralığı (0-4095)
+            # Y ekseni -1000 ile +1000 arasında (sıfır merkezli)
+            p.setYRange(-1000, 1000)
             p.setXRange(0, WINDOW_SIZE)
-            p.showGrid(x=False, y=True, alpha=0.2)
-            
+            p.showGrid(x=True, y=True, alpha=0.3)
+
+            # Sıfır çizgisi ekle (referans için)
+            p.addLine(y=0, pen=pg.mkPen('#888', width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
+
             # Başlık ve Eksenleri Gizle/Küçült
             p.setTitle(f"EMG CH {i+1}", color=colors[i], size="9pt")
-            p.getAxis('left').setStyle(showValues=False) # Değerleri gizle (yer kazanmak için)
+            p.getAxis('left').setStyle(showValues=True) # Değerleri göster (ölçek için)
+            p.getAxis('left').setWidth(35) # Eksen genişliği
             p.getAxis('bottom').setStyle(showValues=False)
-            
+
             curve = p.plot(pen=pg.mkPen(color=colors[i], width=1.5))
             self.plots.append(p)
             self.curves.append(curve)
@@ -582,7 +589,14 @@ class BionicHandGUI(QMainWindow):
             for i in range(6):
                 # Veri varsa curve'ü güncelle
                 if len(self.data_buffers[i]) > 0:
-                    self.curves[i].setData(list(self.data_buffers[i]))
+                    # DC offset removal: Ortalamayı çıkar (veri sıfır etrafında görünsün)
+                    data = list(self.data_buffers[i])
+                    if len(data) > 0:
+                        mean = sum(data) / len(data)
+                        centered_data = [val - mean for val in data]
+                        self.curves[i].setData(centered_data)
+                    else:
+                        self.curves[i].setData(data)
 
     def closeEvent(self, event):
         self.stop_protocol()

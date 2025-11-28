@@ -5,15 +5,14 @@ ESP32-S3 (N16R8) - Biyonik El Projesi
 
 #include <Arduino.h>
 
-// ESP32-S3 Pin Tanımları (Inference kodunla uyumlu)
-// UYARI: GPIO 15 ve 16 ADC2'dir. WiFi kullanıldığında çalışmazlar.
-// Bu kodda WiFi kapalı olduğu için sorun yok.
-#define pin_MW1 4   // ADC1_CH3
-#define pin_MW2 5   // ADC1_CH4
-#define pin_MW3 6   // ADC1_CH5
-#define pin_MW4 7   // ADC1_CH6
-#define pin_MW5 8  // ADC2_CH4
-#define pin_MW6 9  // ADC2_CH5
+// ESP32-S3 Pin Tanımları
+// Tüm sensörler ADC1 üzerinde (ADC2'den kaçınıldı)
+#define pin_MW1 4   // GPIO 4  - ADC1_CH3
+#define pin_MW2 5   // GPIO 5  - ADC1_CH4
+#define pin_MW3 6   // GPIO 6  - ADC1_CH5
+#define pin_MW4 7   // GPIO 7  - ADC1_CH6
+#define pin_MW5 8   // GPIO 8  - ADC1_CH7
+#define pin_MW6 9   // GPIO 9  - ADC1_CH8
 
 // Sampling Ayarları (Feature Extraction ile uyumlu 1000Hz)
 #define FREQUENCY 1000 

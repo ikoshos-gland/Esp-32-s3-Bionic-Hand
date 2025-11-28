@@ -12,6 +12,7 @@ Output: Used by scripts_ai/training_data_collection.py for model training
 */
 
 #include <Arduino.h>
+#include "filters.h"
 
 // ESP32-S3 Pin Definitions (Must match functions.h)
 #define pin_MW1 4   // GPIO 4  - ADC1_CH3
@@ -62,25 +63,40 @@ void setup_ADC() {
 }
 
 void setup(void) {
-  // High baud rate for 1000 Hz @ 6 channels @ 16 bytes/packet = ~96 kbps
+  // High baud rate for 2000 Hz @ 6 channels @ 16 bytes/packet = ~256 kbps
   Serial.begin(921600);
   delay(1000);  // Wait for USB serial to initialize
 
   setup_ADC();
 
+  // Initialize DSP filters (HPF + LPF + Notch)
+  filters_init();
+
   Serial.println("ESP32-S3 Data Acquisition Ready");
   Serial.println("Commands: 'S' = Start streaming, 'E' = End streaming");
-  Serial.println("Sampling: 1000 Hz, 6 channels, 12-bit ADC");
+  Serial.println("Sampling: 2000 Hz @ 921600 baud, 6 channels, 12-bit ADC (with DSP filtering)");
 }
 
 void readSensors() {
-  // Read all 6 EMG channels
-  packet.mw1 = analogRead(pin_MW1);
-  packet.mw2 = analogRead(pin_MW2);
-  packet.mw3 = analogRead(pin_MW3);
-  packet.mw4 = analogRead(pin_MW4);
-  packet.mw5 = analogRead(pin_MW5);
-  packet.mw6 = analogRead(pin_MW6);
+  // Read all 6 EMG channels and apply DSP filters
+  // CRITICAL FIX: DSP filters (HPF) can output NEGATIVE values (DC offset removal)
+  // Casting negative float to uint16_t causes OVERFLOW (e.g., -2047 → 63489)
+  // Solution: Clamp filtered output to valid 12-bit ADC range [0, 4095]
+  
+  float filtered1 = filter_sample(0, (float)analogRead(pin_MW1));
+  float filtered2 = filter_sample(1, (float)analogRead(pin_MW2));
+  float filtered3 = filter_sample(2, (float)analogRead(pin_MW3));
+  float filtered4 = filter_sample(3, (float)analogRead(pin_MW4));
+  float filtered5 = filter_sample(4, (float)analogRead(pin_MW5));
+  float filtered6 = filter_sample(5, (float)analogRead(pin_MW6));
+  
+  // Clamp to 12-bit ADC range [0, 4095] to prevent uint16_t overflow
+  packet.mw1 = (uint16_t)constrain(filtered1, 0.0f, 4095.0f);
+  packet.mw2 = (uint16_t)constrain(filtered2, 0.0f, 4095.0f);
+  packet.mw3 = (uint16_t)constrain(filtered3, 0.0f, 4095.0f);
+  packet.mw4 = (uint16_t)constrain(filtered4, 0.0f, 4095.0f);
+  packet.mw5 = (uint16_t)constrain(filtered5, 0.0f, 4095.0f);
+  packet.mw6 = (uint16_t)constrain(filtered6, 0.0f, 4095.0f);
 }
 
 void loop() {

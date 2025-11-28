@@ -4,6 +4,8 @@
 #include "model.h"
 //functions
 #include "functions.h"
+//DSP filters for EMG signal conditioning
+#include "filters.h"
 //Servo controller for robotic hand
 #include "servo_controller.h"
 
@@ -64,6 +66,9 @@ void setup() {
   // ESP32-S3 ADC defaults to 11dB attenuation (0-2500mV), we need full range
   analogSetAttenuation(ADC_11db);  // 0-3.3V mapping to 0-4095
   Serial.println("✅ ADC configured: 11dB attenuation (0-3.3V → 0-4095)");
+
+  // Initialize DSP filters (HPF + LPF + Notch)
+  filters_init();
 
   // Set up TensorFlow Lite
   static tflite::MicroErrorReporter micro_error_reporter;

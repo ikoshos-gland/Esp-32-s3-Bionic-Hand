@@ -31,6 +31,7 @@
  */
 
 #include "functions.h"
+#include "filters.h"
 #include <Arduino.h>
 #include <cmath>
 
@@ -193,13 +194,24 @@ float* prelim_collection() {
   
   // Collect RAW_WINDOW_SIZE raw samples from all 6 sensors
   for (int i = 0; i < RAW_WINDOW_SIZE; i++) {
-    // Read raw ADC values (0-4095 on ESP32 12-bit ADC)
-    raw_sensor_data[0][i] = (float)analogRead(pin_MW1);
-    raw_sensor_data[1][i] = (float)analogRead(pin_MW2);
-    raw_sensor_data[2][i] = (float)analogRead(pin_MW3);
-    raw_sensor_data[3][i] = (float)analogRead(pin_MW4);
-    raw_sensor_data[4][i] = (float)analogRead(pin_MW5);
-    raw_sensor_data[5][i] = (float)analogRead(pin_MW6);
+    // Read raw ADC values (0-4095 on ESP32 12-bit ADC) and apply DSP filters
+    // CRITICAL FIX: DSP filters (HPF) can output NEGATIVE values (DC offset removal)
+    // Casting negative float to uint16_t causes OVERFLOW → Clamp to [0, 4095]
+    
+    float filtered1 = filter_sample(0, (float)analogRead(pin_MW1));
+    float filtered2 = filter_sample(1, (float)analogRead(pin_MW2));
+    float filtered3 = filter_sample(2, (float)analogRead(pin_MW3));
+    float filtered4 = filter_sample(3, (float)analogRead(pin_MW4));
+    float filtered5 = filter_sample(4, (float)analogRead(pin_MW5));
+    float filtered6 = filter_sample(5, (float)analogRead(pin_MW6));
+    
+    // Clamp to 12-bit ADC range [0, 4095] to prevent overflow in feature extraction
+    raw_sensor_data[0][i] = constrain(filtered1, 0.0f, 4095.0f);
+    raw_sensor_data[1][i] = constrain(filtered2, 0.0f, 4095.0f);
+    raw_sensor_data[2][i] = constrain(filtered3, 0.0f, 4095.0f);
+    raw_sensor_data[3][i] = constrain(filtered4, 0.0f, 4095.0f);
+    raw_sensor_data[4][i] = constrain(filtered5, 0.0f, 4095.0f);
+    raw_sensor_data[5][i] = constrain(filtered6, 0.0f, 4095.0f);
 
     // Update servos every 10 samples (~10ms interval) for smooth motion
     #ifdef REAL_TIME_INFERENCE_MODE
@@ -303,7 +315,7 @@ float* extract_features_from_raw() {
     // This preserves amplitude differences between gestures
     // (Unlike per-window normalization which destroyed this information)
     mav = mav / ADC_MAX_GLOBAL;  // Normalize to [0,1]
-    wl = wl / ADC_MAX_GLOBAL;  // FIXED: Normalize by ADC range only (was dividing by RAW_WINDOW_SIZE too)
+    wl = wl / (ADC_MAX_GLOBAL * RAW_WINDOW_SIZE);  // CRITICAL FIX: Must match Python (divides by 4095 × 250)
     
     // ZC and SSC are counts, optionally normalize if needed
     // For now, keep as raw counts (model can learn appropriate scaling)
