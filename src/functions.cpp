@@ -285,9 +285,9 @@ float* extract_features_from_raw() {
       // ZC: Zero Crossing (with threshold to avoid noise)
       if (i > 0) {
         // Check if sign changed AND difference is significant
-        if ((centered > 0 && prev_centered < 0) || 
+        if ((centered > 0 && prev_centered < 0) ||
             (centered < 0 && prev_centered > 0)) {
-          if (fabs(centered - prev_centered) > ZC_THRESHOLD_ADC) {
+          if (fabs(centered - prev_centered) >= ZC_THRESHOLD_ADC) {
             zc++;
           }
         }

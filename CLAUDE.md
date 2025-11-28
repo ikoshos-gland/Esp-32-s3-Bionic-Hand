@@ -124,7 +124,7 @@ The system processes sensor data through a **DUAL-STAGE** literature-based pipel
 - Implemented in [filters.cpp](src/filters.cpp) / [filters.h](src/filters.h)
 
 **STAGE 2: TD4 Feature Extraction**
-- Applied **per-window** on filtered data (500ms window)
+- Applied **per-window** on filtered data (250ms window)
 - Extracts Hudgins' TD4 features: MAV, WL, ZC, SSC
 - Applied DC offset removal before feature calculation
 - Global normalization using ADC_MAX = 4095
@@ -133,8 +133,8 @@ The system processes sensor data through a **DUAL-STAGE** literature-based pipel
 ### Detailed Pipeline Steps
 
 1. **Real-Time DSP Filtering** (`prelim_collection()` in [functions.cpp](src/functions.cpp):194-209)
-   - Collects **500ms window** of **filtered ADC data** at 1000 Hz
-   - **500 samples per sensor** (1000Hz × 0.5s)
+   - Collects **250ms window** of **filtered ADC data** at 1000 Hz
+   - **250 samples per sensor** (1000Hz × 0.25s)
    - Each raw ADC sample passes through `filter_sample()` from [filters.cpp](src/filters.cpp):301-336
    - **Filter chain per sample:**
      ```
@@ -144,8 +144,8 @@ The system processes sensor data through a **DUAL-STAGE** literature-based pipel
    - **HPF (20 Hz, 4th-order)**: Removes DC drift and motion artifacts (0-20 Hz)
    - **LPF (450 Hz, 4th-order)**: Removes electronic noise (>500 Hz)
    - **Notch (50/60 Hz, 2nd-order)**: Removes powerline interference
-   - Stores filtered data in `raw_sensor_data[6][500]` buffers
-   - **Response time: 500ms** (still captures gesture dynamics well)
+   - Stores filtered data in `raw_sensor_data[6][250]` buffers
+   - **Response time: 250ms** (fast gesture detection)
 
 2. **DC Offset Removal & Feature Extraction** (`extract_features_from_raw()` in [functions.cpp](src/functions.cpp):228-340)
    - **STEP 1: Calculate mean** (remaining DC offset) for each sensor on filtered data
@@ -262,7 +262,7 @@ From [functions.h](src/functions.h):
 #define NUM_SENSORS       6      // Number of EMG sensors
 
 // Raw data collection
-#define RAW_WINDOW_SIZE   500    // 500ms window (500 samples at 1kHz)
+#define RAW_WINDOW_SIZE   250    // 250ms window (250 samples at 1kHz)
 #define SAMPLING_FREQ     1000   // 1000 Hz sampling rate
 
 // Global ADC normalization (12-bit ADC on ESP32)
@@ -438,7 +438,7 @@ Raw ADC → DSP Filters (HPF→LPF→Notch) → DC offset removal → TD4 featur
 | **Signal Quality** | Raw noisy ADC | **Clean filtered EMG band** |
 | **Filter Order** | N/A | **HPF(20Hz) → LPF(450Hz) → Notch(50Hz)** |
 | **Memory Usage** | ~1.5 KB | **~2 KB (~480B filters + buffers)** |
-| **Latency** | 500ms | **~512ms (500ms + 12ms filters)** |
+| **Latency** | 250ms | **~282ms (250ms + 12ms filters)** |
 | **CPU Usage** | ~5% | **~5.5% (~0.5% for filters)** |
 
 ### Why DSP Filtering Matters
@@ -576,7 +576,7 @@ Build flags:
 
 ### Code Architecture Notes
 - **Filter state buffers**: `filter_states[NUM_SENSORS]` in [filters.cpp](src/filters.cpp):98 - per-sensor biquad states
-- **Raw sensor buffers**: `raw_sensor_data[6][500]` - 500 filtered ADC samples per sensor
+- **Raw sensor buffers**: `raw_sensor_data[6][250]` - 250 filtered ADC samples per sensor
 - **24 feature array**: Global `features[NUM_FEATURES]` in [functions.cpp](src/functions.cpp)
 - **DSP filtering applied per-sample**: Each ADC read passes through `filter_sample()` before storage
 - **DC offset removal**: Mean calculated per sensor, subtracted to center signal at 0
@@ -586,7 +586,7 @@ Build flags:
 - Serial output shows DSP filter status, TD4 features per sensor, and 11 class probabilities
 - Duplicate gestures suppressed (only shows when gesture changes)
 - Confidence threshold: 0.8 for gesture detection
-- **Response time**: 500ms collection + ~12ms DSP + ~20ms inference = ~532ms total latency
+- **Response time**: 250ms collection + ~12ms DSP + ~20ms inference = ~282ms total latency
 
 ### Model Architecture & Performance
 - **Wide & Deep MLP**: 256→128→64 neurons with dropout regularization

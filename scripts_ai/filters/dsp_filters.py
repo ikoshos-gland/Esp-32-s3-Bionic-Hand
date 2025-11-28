@@ -34,7 +34,7 @@ class EMGFilterBank:
     """
 
     def __init__(self,
-                 sampling_rate: int = 2000,
+                 sampling_rate: int = 1000,
                  powerline_freq: int = 50,
                  enable_hpf: bool = True,
                  enable_lpf: bool = True,

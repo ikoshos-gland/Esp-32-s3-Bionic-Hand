@@ -38,7 +38,7 @@ class TD4FeatureExtractor:
     def __init__(self,
                  window_size_ms: int = 250,
                  overlap_ms: int = 125,
-                 sampling_rate: int = 2000,
+                 sampling_rate: int = 1000,
                  zc_threshold_adc: float = 15.0,
                  ssc_threshold_adc: float = 15.0,
                  adc_max: float = 4095.0):
@@ -488,7 +488,7 @@ def extract_features_from_csv(csv_path: str,
     extractor = TD4FeatureExtractor(
         window_size_ms=250,
         overlap_ms=125,
-        sampling_rate=2000,
+        sampling_rate=1000,
         zc_threshold_adc=15.0,
         ssc_threshold_adc=15.0,
         adc_max=4095.0

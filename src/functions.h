@@ -12,7 +12,7 @@
 
 // Raw data collection configuration
 // CHANGED: Using raw signal processing instead of RMS windows
-#define RAW_WINDOW_SIZE  500   // 500ms window (500 samples at 1kHz) - Unified 1000 Hz sampling
+#define RAW_WINDOW_SIZE  250   // 250ms window (250 samples at 1kHz) - Unified 1000 Hz sampling
 #define SAMPLING_FREQ    1000  // 1000 Hz sampling rate - Unified for all modes
 
 // Global ADC normalization bounds (12-bit ADC on ESP32)
