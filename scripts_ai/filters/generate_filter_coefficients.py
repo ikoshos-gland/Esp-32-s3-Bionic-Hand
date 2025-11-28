@@ -211,7 +211,7 @@ def main():
     cpp_header = generate_cpp_header(coeffs_1000, coeffs_2000, powerline_freq)
 
     # Save to file
-    output_file = f"../src/filter_coefficients_{powerline_freq}hz.h"
+    output_file = f"../../src/filter_coefficients_{powerline_freq}hz.h"
     with open(output_file, 'w') as f:
         f.write(cpp_header)
 

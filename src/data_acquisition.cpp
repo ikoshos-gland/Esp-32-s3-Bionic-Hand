@@ -22,10 +22,10 @@ Output: Used by scripts_ai/training_data_collection.py for model training
 #define pin_MW5 15  // GPIO 15 - ADC2_CH4
 #define pin_MW6 16  // GPIO 16 - ADC2_CH5
 
-// Sampling Configuration (2000 Hz - high precision mode)
-#define FREQUENCY 2000
-// Calibrated interval: ESP32-S3 clock runs ~12.7% fast, so compensate
-#define INTERVAL_US 564  // Empirically calibrated to achieve 2000 Hz (500 * 1.127)
+// Sampling Configuration (1000 Hz - unified with real-time inference)
+#define FREQUENCY 1000
+// Standard interval for 1000 Hz sampling (UNIFIED with functions.h)
+#define INTERVAL_US 1000  // 1000μs = 1ms = 1000Hz
 
 unsigned long last_sample_time = 0;
 bool streaming = false;
@@ -74,7 +74,7 @@ void setup(void) {
 
   Serial.println("ESP32-S3 Data Acquisition Ready");
   Serial.println("Commands: 'S' = Start streaming, 'E' = End streaming");
-  Serial.println("Sampling: 2000 Hz @ 921600 baud, 6 channels, 12-bit ADC (with DSP filtering)");
+  Serial.println("Sampling: 1000 Hz @ 921600 baud, 6 channels, 12-bit ADC (with DSP filtering)");
 }
 
 void readSensors() {
