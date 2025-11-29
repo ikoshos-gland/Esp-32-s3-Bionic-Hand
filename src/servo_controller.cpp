@@ -32,38 +32,26 @@
 // ============================================================================
 
 const int ServoController::gesture_angles[NUM_GESTURES][NUM_SERVOS] = {
-    // Gesture 0: Rest - Fingers extended, safe resting position
+    // Gesture 0: No Movement - Fingers extended, neutral resting position
     {10,  10,   0,   0,   0,   0},
 
-    // Gesture 1: Fist - All fingers closed, thumb across
-    {90, 160, 170, 170, 170, 170},
+    // Gesture 1: Wrist Flexion - Neutral mid-position (flexing wrist)
+    {45,  45,  45,  45,  45,  45},
 
-    // Gesture 2: Open - Same as Rest (fully extended hand)
-    {10,  10,   0,   0,   0,   0},
+    // Gesture 2: Wrist Extension - Fingers slightly extended
+    {20,  20,  10,  10,  10,  10},
 
-    // Gesture 3: Point - Index extended, others closed, thumb supporting
-    {90, 150,  10, 170, 170, 170},
+    // Gesture 3: Wrist Pronation - Thumb rotated inward
+    {70,  30,  20,  20,  20,  20},
 
-    // Gesture 4: Victory - Index and middle extended, others closed
-    {90, 160,  10,  10, 170, 170},
+    // Gesture 4: Wrist Supination - Thumb rotated outward
+    {30,  30,  20,  20,  20,  20},
 
-    // Gesture 5: OK - Thumb and index forming circle, others extended
-    {80, 120, 130,   0,   0,   0},
+    // Gesture 5: Chuck Grip - Thumb and index/middle touching (tripod pinch)
+    {90, 100, 110, 110,  10,  10},
 
-    // Gesture 6: ThumbUp - Thumb extended up, fingers closed
-    { 0,  10, 170, 170, 170, 170},
-
-    // Gesture 7: ThumbDn - Thumb pointing down, fingers closed
-    { 0, 160, 170, 170, 170, 170},
-
-    // Gesture 8: Grasp - All fingers in C-shape for grasping objects
-    {60,  60,  70,  70,  70,  70},
-
-    // Gesture 9: Pinch - Thumb and index touching, others extended
-    {90, 100, 110,  10,  10,  10},
-
-    // Gesture 10: WristFlex - Neutral mid-position
-    {45,  45,  45,  45,  45,  45}
+    // Gesture 6: Hand Open - Fully extended hand
+    {10,  10,   0,   0,   0,   0}
 };
 
 // Constructor
@@ -128,8 +116,8 @@ void ServoController::moveToGesture(int gesture_id) {
     const int* angles = gesture_angles[gesture_id];
 
     // Debug output
-    const char* gesture_names[] = {"Rest", "Fist", "Open", "Point", "Victory",
-                                   "OK", "ThumbUp", "ThumbDn", "Grasp", "Pinch", "WristFlex"};
+    const char* gesture_names[] = {"No Movement", "Wrist Flexion", "Wrist Extension",
+                                   "Wrist Pronation", "Wrist Supination", "Chuck Grip", "Hand Open"};
     const char* servo_names[] = {"Thumb_Rot", "Thumb_Flex", "Index", "Middle", "Ring", "Pinky"};
 
     Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");

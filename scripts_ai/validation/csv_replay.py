@@ -43,17 +43,17 @@ class CSVReplaySystem:
     against ground truth labels from CSV files.
     """
 
-    # Protocol constants
-    WINDOW_HEADER = bytes([0xA5, 0x5A])
-    RESPONSE_HEADER = bytes([0xB5, 0x6B])
+    # Protocol constants - Real-Time Streaming Mode
+    SAMPLE_HEADER = bytes([0xAA, 0x55])  # Sample packet header
+    RESPONSE_HEADER = bytes([0xB5, 0x6B])  # Response packet header
     WINDOW_SIZE = 250  # Samples per window
-    NUM_SENSORS = 6
-    NUM_FEATURES = 24  # 4 TD4 features × 6 sensors
+    NUM_SENSORS = 8  # Using all 8 EMG sensors for model validation
+    NUM_FEATURES = 32  # 4 TD4 features × 8 sensors
 
-    # Gesture names (MUST match ESP32 exactly!)
+    # Gesture names (MUST match model exactly!)
     GESTURE_NAMES = [
-        "Rest", "Fist", "Open", "Point", "Victory",
-        "OK", "ThumbUp", "ThumbDn", "Grasp", "Pinch", "WristFlex"
+        "No Movement", "Wrist Flexion", "Wrist Extension",
+        "Wrist Pronation", "Wrist Supination", "Chuck Grip", "Hand Open"
     ]
 
     # ADC constants
@@ -115,7 +115,7 @@ class CSVReplaySystem:
         CSV Format:
         - Columns: Timestamp, Seq, Movement, Phase, Rep, EMG1-EMG8
         - EMG values: Normalized floats (-1.0 to +1.0)
-        - Movement labels: Integer 1-11 (maps to 0-10 for ESP32)
+        - Movement labels: Integer 1-7 (maps to 0-6 for model)
 
         Returns:
             True if successful, False otherwise
@@ -124,8 +124,8 @@ class CSVReplaySystem:
             print("Loading CSV file...")
             df = pd.read_csv(self.csv_path)
 
-            # Extract EMG1-6 columns (we only use 6 sensors)
-            emg_columns = ['EMG1', 'EMG2', 'EMG3', 'EMG4', 'EMG5', 'EMG6']
+            # Extract EMG1-8 columns (using all 8 sensors for model validation)
+            emg_columns = ['EMG1', 'EMG2', 'EMG3', 'EMG4', 'EMG5', 'EMG6', 'EMG7', 'EMG8']
 
             # Verify columns exist
             missing_cols = [col for col in emg_columns if col not in df.columns]
@@ -138,18 +138,18 @@ class CSVReplaySystem:
                 return False
 
             # Extract data
-            self.emg_data = df[emg_columns].values  # Shape: (samples, 6)
+            self.emg_data = df[emg_columns].values  # Shape: (samples, 8)
 
-            # Convert Movement labels (1-11) to ESP32 indices (0-10)
-            # CSV Movement: 1=Fist, 2=Open, ..., 11=WristFlex
-            # ESP32 indices: 0=Rest, 1=Fist, 2=Open, ..., 10=WristFlex
+            # Convert Movement labels (1-7) to model indices (0-6)
+            # CSV Movement: 1=No Movement, 2=Wrist Flexion, ..., 7=Hand Open
+            # Model indices: 0=No Movement, 1=Wrist Flexion, ..., 6=Hand Open
             self.ground_truth_labels = (df['Movement'].values - 1).astype(np.int8)
 
             # Calculate number of non-overlapping windows
             total_samples = len(self.emg_data)
             self.num_windows = total_samples // self.WINDOW_SIZE
 
-            print(f"✓ CSV loaded successfully")
+            print(f"OK: CSV loaded successfully")
             print(f"  Total samples: {total_samples:,}")
             print(f"  EMG sensors: {len(emg_columns)}")
             print(f"  Non-overlapping windows: {self.num_windows}")
@@ -190,54 +190,49 @@ class CSVReplaySystem:
 
         return adc_int
 
-    def stream_batch(self, window_data: np.ndarray, ground_truth: int) -> bool:
+    def send_sample(self, sample_data: np.ndarray, ground_truth: int) -> bool:
         """
-        Send a 250-sample window to ESP32 via serial
+        Send a single EMG sample to ESP32 via serial (simulates real-time ADC)
 
-        Window Packet Format (3007 bytes):
-        - Header (2 bytes): 0xA5, 0x5A
-        - Ground Truth (1 byte): 0-10
-        - Window Size (2 bytes): 250 (little-endian uint16)
-        - Data (3000 bytes): 250 samples × 6 sensors × 2 bytes (uint16)
-        - Checksum (2 bytes): sum(data) % 65536 (little-endian uint16)
+        Sample Packet Format (21 bytes):
+        - Header (2 bytes): 0xAA, 0x55
+        - Sensors (16 bytes): 8 sensors × 2 bytes (uint16, little-endian)
+        - Ground Truth (1 byte): 0-6
+        - Checksum (2 bytes): sum(sensor_bytes) % 65536 (little-endian uint16)
 
         Args:
-            window_data: Window data (250, 6) in ADC units (uint16)
-            ground_truth: Ground truth gesture label (0-10)
+            sample_data: Single sample data (8,) in ADC units (uint16)
+            ground_truth: Ground truth gesture label (0-6)
 
         Returns:
-            True if packet sent successfully
+            True if sample sent successfully
         """
         try:
             # Build packet
             packet = bytearray()
 
             # Header
-            packet.extend(self.WINDOW_HEADER)
+            packet.extend(self.SAMPLE_HEADER)
+
+            # Sensors (8 × uint16, little-endian)
+            sensor_bytes = bytearray()
+            for sensor_idx in range(self.NUM_SENSORS):
+                adc_value = sample_data[sensor_idx]
+                sensor_bytes.extend(struct.pack('<H', adc_value))
+
+            packet.extend(sensor_bytes)
 
             # Ground truth (uint8)
             packet.append(ground_truth)
 
-            # Window size (uint16, little-endian)
-            packet.extend(struct.pack('<H', self.WINDOW_SIZE))
-
-            # Data (250 samples × 6 sensors, uint16 little-endian)
-            data_bytes = bytearray()
-            for sample_idx in range(self.WINDOW_SIZE):
-                for sensor_idx in range(self.NUM_SENSORS):
-                    adc_value = window_data[sample_idx, sensor_idx]
-                    data_bytes.extend(struct.pack('<H', adc_value))
-
-            packet.extend(data_bytes)
-
-            # Checksum (sum of all data bytes % 65536)
-            checksum = sum(data_bytes) % 65536
+            # Checksum (sum of sensor bytes % 65536)
+            checksum = sum(sensor_bytes) % 65536
             packet.extend(struct.pack('<H', checksum))
 
-            # Verify packet size
-            expected_size = 2 + 1 + 2 + 3000 + 2  # 3007 bytes
+            # Verify packet size (21 bytes)
+            expected_size = 2 + 16 + 1 + 2
             if len(packet) != expected_size:
-                print(f"ERROR: Packet size mismatch ({len(packet)} != {expected_size})")
+                print(f"ERROR: Sample packet size mismatch ({len(packet)} != {expected_size})")
                 return False
 
             # Send packet
@@ -247,18 +242,18 @@ class CSVReplaySystem:
             return True
 
         except Exception as e:
-            print(f"ERROR sending packet: {e}")
+            print(f"ERROR sending sample: {e}")
             return False
 
     def receive_response(self, timeout: float = 2.0) -> Optional[Dict]:
         """
         Receive and parse response packet from ESP32
 
-        Response Packet Format (106 bytes):
+        Response Packet Format (138 bytes):
         - Header (2 bytes): 0xB5, 0x6B
-        - Predicted Gesture (1 byte): 0-10 or 255 (no prediction)
+        - Predicted Gesture (1 byte): 0-6 or 255 (no prediction)
         - Confidence (4 bytes): Float32
-        - Features (96 bytes): 24 × Float32 (TD4 features)
+        - Features (128 bytes): 32 × Float32 (TD4 features for 8 sensors)
         - Ground Truth Echo (1 byte): Echo of sent ground truth
         - Checksum (2 bytes): Validation
 
@@ -321,7 +316,7 @@ class CSVReplaySystem:
             received_checksum = struct.unpack('<H', checksum_bytes)[0]
 
             # Calculate expected checksum (sum of all data bytes before checksum)
-            # Data: pred(1) + conf(4) + features(96) + gt_echo(1) = 102 bytes
+            # Data: pred(1) + conf(4) + features(128) + gt_echo(1) = 134 bytes
             data_for_checksum = bytearray()
             data_for_checksum.append(predicted_gesture)
             data_for_checksum.extend(conf_bytes)
@@ -377,7 +372,7 @@ class CSVReplaySystem:
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
 
-            print("✓ Serial port opened successfully")
+            print("OK: Serial port opened successfully")
             print()
             return True
 
@@ -430,7 +425,7 @@ class CSVReplaySystem:
                 end_idx = start_idx + self.WINDOW_SIZE
 
                 # Get normalized EMG data for this window
-                emg_window_norm = self.emg_data[start_idx:end_idx, :]  # (250, 6)
+                emg_window_norm = self.emg_data[start_idx:end_idx, :]  # (250, 8)
 
                 # Get ground truth (majority vote in window)
                 gt_window = self.ground_truth_labels[start_idx:end_idx]
@@ -439,13 +434,31 @@ class CSVReplaySystem:
                 # Scale to ADC
                 emg_window_adc = self.scale_to_adc(emg_window_norm)
 
-                # Send window to ESP32
-                if not self.stream_batch(emg_window_adc, ground_truth):
-                    print(f"ERROR: Failed to send window {window_idx}")
-                    continue
+                # DIAGNOSTIC: Log first window details (Python side)
+                if window_idx == 0:
+                    print("\n=== PYTHON DIAGNOSTIC: First Window ===")
+                    print(f"Normalized EMG (first 5 samples, all sensors):")
+                    for i in range(min(5, len(emg_window_norm))):
+                        print(f"  Sample {i}: {emg_window_norm[i]}")
+                    print(f"\nScaled ADC (first 5 samples, all sensors):")
+                    for i in range(min(5, len(emg_window_adc))):
+                        print(f"  Sample {i}: {emg_window_adc[i]}")
+                    print("=== END PYTHON DIAGNOSTIC ===\n")
 
-                # Receive response
-                response = self.receive_response()
+                # Send samples one-by-one (simulates real-time ADC)
+                for sample_idx in range(self.WINDOW_SIZE):
+                    sample = emg_window_adc[sample_idx, :]  # (8,)
+                    
+                    if not self.send_sample(sample, ground_truth):
+                        print(f"ERROR: Failed to send sample {sample_idx} of window {window_idx}")
+                        break
+                    
+                    # Small delay to simulate real-time sampling rate
+                    # At 1000 Hz sampling: 1ms between samples
+                    time.sleep(0.001)  # 1ms delay
+
+                # After 250 samples sent, ESP32 should send response
+                response = self.receive_response(timeout=5.0)
                 if response is None:
                     print(f"ERROR: Failed to receive response for window {window_idx}")
                     continue
@@ -459,6 +472,19 @@ class CSVReplaySystem:
                 confidence = response['confidence']
                 features = response['features']
 
+                # DIAGNOSTIC: Log first window response (Python side)
+                if window_idx == 0:
+                    print("\n=== PYTHON DIAGNOSTIC: ESP32 Response ===")
+                    print(f"Ground truth: {ground_truth}")
+                    print(f"Predicted: {predicted}")
+                    print(f"Confidence: {confidence:.6f}")
+                    print(f"\nFeatures received from ESP32 (all 32):")
+                    for i in range(len(features)):
+                        sensor_num = i // 4 + 1
+                        feature_type = ['MAV', 'WL', 'ZC', 'SSC'][i % 4]
+                        print(f"  Sensor{sensor_num}_{feature_type}: {features[i]:.8f}")
+                    print("=== END PYTHON DIAGNOSTIC ===\n")
+
                 # Check correctness
                 is_correct = (predicted == ground_truth)
                 if is_correct:
@@ -471,9 +497,9 @@ class CSVReplaySystem:
                 self.ground_truths.append(ground_truth)
 
                 # Console output
-                gt_name = self.GESTURE_NAMES[ground_truth] if 0 <= ground_truth < 11 else "UNKNOWN"
-                pred_name = self.GESTURE_NAMES[predicted] if 0 <= predicted < 11 else "NO_PRED"
-                status = "✓" if is_correct else "✗"
+                gt_name = self.GESTURE_NAMES[ground_truth] if 0 <= ground_truth < 7 else "UNKNOWN"
+                pred_name = self.GESTURE_NAMES[predicted] if 0 <= predicted < 7 else "NO_PRED"
+                status = "OK" if is_correct else "X"
 
                 print(f"Window {window_idx:3d}/{self.num_windows}: GT={gt_name:10s} PRED={pred_name:10s} ({confidence:.2f}) {status}")
 
@@ -562,7 +588,7 @@ class CSVReplaySystem:
 
             # Save figure
             plt.savefig(self.confusion_matrix_file, dpi=300, bbox_inches='tight')
-            print(f"✓ Confusion matrix saved to: {self.confusion_matrix_file}")
+            print(f"OK: Confusion matrix saved to: {self.confusion_matrix_file}")
 
             plt.close()
 
@@ -620,10 +646,10 @@ def main():
         success = replay.run_replay()
 
         if success:
-            print("✓ Replay completed successfully")
+            print("OK: Replay completed successfully")
             return 0
         else:
-            print("✗ Replay failed")
+            print("X: Replay failed")
             return 1
 
     finally:

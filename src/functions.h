@@ -20,6 +20,12 @@
 #define ADC_MIN_GLOBAL   0.0f
 #define ADC_MAX_GLOBAL   4095.0f
 
+// TD4 feature thresholds (in ADC units, NOT normalized values)
+// Used for noise reduction in ZC and SSC features
+// CRITICAL: Must match Python training pipeline thresholds
+#define ZC_THRESHOLD_ADC   15.0f   // Zero crossing threshold (ADC units)
+#define SSC_THRESHOLD_ADC  15.0f   // Slope sign change threshold (ADC units)
+
 // Safe ESP32-S3 GPIO pins (avoiding UART0/Serial conflicts)
 // CHANGED: GPIO 1-2 conflict with UART0, now using ADC1 pins 4-7 and ADC2 pins 15-16
 // WARNING: You must physically reconnect sensors to these new pins!

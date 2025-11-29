@@ -178,7 +178,7 @@ void loop() {
 
   // Display output probabilities (Float32 - no dequantization needed)
   Serial.print("Probabilities: ");
-  for(int i = 0; i < 11; i++) {
+  for(int i = 0; i < 7; i++) {
     float prob = output->data.f[i];  // Direct Float32 access
     Serial.printf("%.3f ", prob);
   }
@@ -187,7 +187,7 @@ void loop() {
   // Find highest confidence gesture (above threshold)
   this_predict = -1;
   float max_confidence = 0.8;  // Threshold (TEMPORARILY LOWERED: 0.5 = 50%, normally 0.8 = 80%)
-  for (int i = 0; i < 11; i++) {
+  for (int i = 0; i < 7; i++) {
     float prob = output->data.f[i];  // Direct Float32 access
     if (prob > max_confidence) {
       max_confidence = prob;
@@ -214,9 +214,9 @@ void loop() {
     this_predict = confirmed_gesture;
   }
 
-  // Gesture names
-  const char* gesture_names[] = {"Rest", "Fist", "Open", "Point", "Victory",
-                                  "OK", "ThumbUp", "ThumbDn", "Grasp", "Pinch", "WristFlex"};
+  // Gesture names (7 classes for real-like-time classification)
+  const char* gesture_names[] = {"No Movement", "Wrist Flexion", "Wrist Extension",
+                                  "Wrist Pronation", "Wrist Supination", "Chuck Grip", "Hand Open"};
 
   // Motion Locking: Prevent rapid re-detection with cooldown period
   unsigned long current_time = millis();

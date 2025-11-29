@@ -3,7 +3,7 @@
  * @brief Servo controller for ESP32-S3 robotic hand gesture control
  *
  * Controls 6 servos (Thumb_Rotation, Thumb_Flex, Index, Middle, Ring, Pinky)
- * based on 11 detected hand gestures with smooth interpolated transitions.
+ * based on 7 detected hand gestures with smooth interpolated transitions.
  *
  * Hardware Configuration:
  * - Servo 0 (Thumb Rotation): GPIO 10
@@ -22,7 +22,7 @@
 
 // Configuration constants
 #define NUM_SERVOS 6
-#define NUM_GESTURES 11
+#define NUM_GESTURES 7
 #define DEFAULT_INTERPOLATION_DURATION_MS 500
 
 /**
@@ -52,7 +52,7 @@ private:
     unsigned long interpolation_duration;   // Duration of transition (ms)
     int start_positions[NUM_SERVOS];        // Starting angles for interpolation
 
-    // Gesture-to-servo angle mapping (11 gestures × 6 servos)
+    // Gesture-to-servo angle mapping (7 gestures × 6 servos)
     // Format: [Thumb_Rotation, Thumb_Flex, Index, Middle, Ring, Pinky]
     // Convention: 0° = fully extended (open), 180° = fully closed (fist)
     static const int gesture_angles[NUM_GESTURES][NUM_SERVOS];
@@ -101,9 +101,9 @@ public:
     /**
      * @brief Move servos to match detected gesture
      *
-     * @param gesture_id Gesture ID (0-10):
-     *   0: Rest, 1: Fist, 2: Open, 3: Point, 4: Victory,
-     *   5: OK, 6: ThumbUp, 7: ThumbDn, 8: Grasp, 9: Pinch, 10: WristFlex
+     * @param gesture_id Gesture ID (0-6):
+     *   0: No Movement, 1: Wrist Flexion, 2: Wrist Extension,
+     *   3: Wrist Pronation, 4: Wrist Supination, 5: Chuck Grip, 6: Hand Open
      *
      * Triggers smooth interpolated movement over DEFAULT_INTERPOLATION_DURATION_MS.
      * If gesture_id is invalid, prints error and does nothing.

@@ -79,24 +79,30 @@ void setup(void) {
 
 void readSensors() {
   // Read all 6 EMG channels and apply DSP filters
-  // CRITICAL FIX: DSP filters (HPF) can output NEGATIVE values (DC offset removal)
-  // Casting negative float to uint16_t causes OVERFLOW (e.g., -2047 → 63489)
-  // Solution: Clamp filtered output to valid 12-bit ADC range [0, 4095]
-  
+  // CRITICAL: DSP filters (HPF) output BIPOLAR signals centered at 0 (e.g., -500 to +500)
+  // Since we send uint16_t over serial, we must ADD DC BIAS to shift into [0, 4095] range
+  //
+  // DC BIAS = 2048 (VCC/2 for 12-bit ADC)
+  // This matches csv_replay.py scaling: ADC = (EMG + 1.0) × 2047.5
+  //
+  // Python training pipeline will later subtract the mean to restore bipolar signal.
+  // This preserves the full waveform (no half-wave rectification).
+
   float filtered1 = filter_sample(0, (float)analogRead(pin_MW1));
   float filtered2 = filter_sample(1, (float)analogRead(pin_MW2));
   float filtered3 = filter_sample(2, (float)analogRead(pin_MW3));
   float filtered4 = filter_sample(3, (float)analogRead(pin_MW4));
   float filtered5 = filter_sample(4, (float)analogRead(pin_MW5));
   float filtered6 = filter_sample(5, (float)analogRead(pin_MW6));
-  
-  // Clamp to 12-bit ADC range [0, 4095] to prevent uint16_t overflow
-  packet.mw1 = (uint16_t)constrain(filtered1, 0.0f, 4095.0f);
-  packet.mw2 = (uint16_t)constrain(filtered2, 0.0f, 4095.0f);
-  packet.mw3 = (uint16_t)constrain(filtered3, 0.0f, 4095.0f);
-  packet.mw4 = (uint16_t)constrain(filtered4, 0.0f, 4095.0f);
-  packet.mw5 = (uint16_t)constrain(filtered5, 0.0f, 4095.0f);
-  packet.mw6 = (uint16_t)constrain(filtered6, 0.0f, 4095.0f);
+
+  // Add DC bias (2048) to center bipolar signal in uint16 ADC range
+  // Then constrain to [0, 4095] to prevent overflow
+  packet.mw1 = (uint16_t)constrain(filtered1 + 2048.0f, 0.0f, 4095.0f);
+  packet.mw2 = (uint16_t)constrain(filtered2 + 2048.0f, 0.0f, 4095.0f);
+  packet.mw3 = (uint16_t)constrain(filtered3 + 2048.0f, 0.0f, 4095.0f);
+  packet.mw4 = (uint16_t)constrain(filtered4 + 2048.0f, 0.0f, 4095.0f);
+  packet.mw5 = (uint16_t)constrain(filtered5 + 2048.0f, 0.0f, 4095.0f);
+  packet.mw6 = (uint16_t)constrain(filtered6 + 2048.0f, 0.0f, 4095.0f);
 }
 
 void loop() {

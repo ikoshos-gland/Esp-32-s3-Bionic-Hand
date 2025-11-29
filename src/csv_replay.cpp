@@ -1,26 +1,29 @@
 /*
-ESP32-S3 CSV Replay Mode - Offline Model Validation
-====================================================
+ESP32-S3 CSV Replay Mode - Offline Model Validation (8-Sensor)
+================================================================
 
-Purpose: Receive pre-recorded EMG data from Python script and run TFLite inference
+Purpose: Receive pre-recorded 8-channel EMG data from Python script and run TFLite inference
          for offline model validation without physical sensors.
 
 Architecture:
   Python (csv_replay.py) → Serial (Binary Protocol) → ESP32 (This File)
                                                         ↓
-  Window Packet (3007 bytes) → Populate raw_sensor_data → extract_features_from_raw()
+  Window Packet (4007 bytes) → Populate raw_sensor_data → extract_features_from_local_buffer()
                                                         ↓
-                                    TFLite Inference → Response Packet (106 bytes)
+                                    TFLite Inference → Response Packet (138 bytes)
                                                         ↓
                                     Python (Validation & Logging)
 
 Serial Protocol:
-  - Window Packet: Header(2) + GT(1) + Size(2) + Data(3000) + Checksum(2) = 3007 bytes
-  - Response Packet: Header(2) + Pred(1) + Conf(4) + Features(96) + GT(1) + Checksum(2) = 106 bytes
+  - Window Packet: Header(2) + GT(1) + Size(2) + Data(4000) + Checksum(2) = 4007 bytes
+    - 8 sensors × 250 samples × 2 bytes = 4000 bytes
+  - Response Packet: Header(2) + Pred(1) + Conf(4) + Features(128) + GT(1) + Checksum(2) = 138 bytes
+    - 32 features (8 sensors × 4 TD4 features) × 4 bytes = 128 bytes
 
 Key Features:
-  - Bypasses DSP filters (data already clean/filtered)
-  - Reuses existing extract_features_from_raw() function
+  - Supports 8-channel EMG models (independent of 6-sensor hardware config)
+  - Bypasses DSP filters (CSV data already clean/filtered)
+  - Implements TD4 feature extraction for 8 sensors (32 features total)
   - Binary protocol with checksums for reliability
   - Comprehensive error handling and logging
 
@@ -52,27 +55,28 @@ References:
 #include "tensorflow/lite/version.h"
 
 // =============================================================================
-// BINARY PROTOCOL STRUCTURES
+// BINARY PROTOCOL STRUCTURES - REAL-TIME STREAMING MODE
 // =============================================================================
 
-// Window Packet: Python → ESP32 (3007 bytes total)
+// Sample Packet: Python → ESP32 (21 bytes per sample)
+// Simulates real-time ADC sample arrival
 #pragma pack(push, 1)
-struct WindowPacket {
-  uint8_t header[2];        // Sync bytes: 0xA5, 0x5A
-  uint8_t ground_truth;     // Gesture label (0-10, or 255 = unknown)
-  uint16_t window_size;     // Should be 250
-  uint16_t data[250 * 6];   // 250 samples × 6 sensors = 1500 uint16_t = 3000 bytes
-  uint16_t checksum;        // Sum of all data values % 65536
+struct SamplePacket {
+  uint8_t header[2];        // Sync bytes: 0xAA, 0x55
+  uint16_t sensors[8];      // 8 sensors × 2 bytes = 16 bytes
+  uint8_t ground_truth;     // Gesture label (0-10)
+  uint16_t checksum;        // Sum of sensor bytes % 65536
 };
 #pragma pack(pop)
 
-// Response Packet: ESP32 → Python (106 bytes total)
+// Response Packet: ESP32 → Python (138 bytes total)
+// Sent ONLY when a complete window (250 samples) is collected
 #pragma pack(push, 1)
 struct ResponsePacket {
   uint8_t header[2];           // Sync bytes: 0xB5, 0x6B
   uint8_t predicted_gesture;   // 0-10 or 255 (no prediction)
   float confidence;            // Float32 (0.0-1.0)
-  float features[24];          // 24× Float32 TD4 features (96 bytes)
+  float features[32];          // 32× Float32 TD4 features for 8 sensors (128 bytes)
   uint8_t ground_truth;        // Echo back
   uint16_t checksum;           // Validation
 };
@@ -102,33 +106,66 @@ const char* gesture_names[] = {
 };
 
 // Serial communication buffer
-constexpr size_t RX_BUFFER_SIZE = 4096;  // Large enough for WindowPacket
+constexpr size_t RX_BUFFER_SIZE = 4096;
 
-// Local raw sensor data buffer (same format as functions.cpp)
-// NOTE: Cannot use extern since functions.cpp declares it as static
-// We'll populate this buffer and pass it to extract_features_from_raw() manually
-float raw_sensor_data_local[NUM_SENSORS][RAW_WINDOW_SIZE];
+// Circular buffer state for real-time streaming
+volatile int buffer_write_index = 0;      // Current position in circular buffer
+volatile int samples_collected = 0;        // Samples collected in current window
+volatile uint8_t window_ground_truth = 0;  // Ground truth for current window
+volatile bool window_ready = false;        // Flag: window complete, ready for inference
+
+// Local raw sensor data buffer for 8-sensor CSV replay validation
+// NOTE: Using 8 sensors for CSV replay (model trained with 8 channels)
+// This is independent of the 6-sensor hardware configuration in functions.h
+#define CSV_NUM_SENSORS 8
+#define CSV_NUM_FEATURES 32  // 4 TD4 features × 8 sensors
+
+float raw_sensor_data_local[CSV_NUM_SENSORS][RAW_WINDOW_SIZE];
 
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
 
 /**
- * Extract features from local raw buffer
+ * Extract features from local raw buffer (8-sensor CSV replay version)
  *
- * This is a wrapper that processes our local buffer using the same
- * TD4 feature extraction logic as functions.cpp extract_features_from_raw()
+ * IMPORTANT: This function processes 8 EMG sensors for CSV replay validation,
+ * independent of the 6-sensor hardware configuration.
  *
- * @param raw_data 2D array [NUM_SENSORS][RAW_WINDOW_SIZE]
- * @param output_features Output array [NUM_FEATURES]
+ * The implementation follows the same logic as functions.cpp::extract_features_from_raw():
+ * - Same DC offset removal (mean subtraction)
+ * - Same TD4 feature calculations (MAV, WL, ZC, SSC)
+ * - Same thresholds (ZC_THRESHOLD_ADC, SSC_THRESHOLD_ADC from functions.h)
+ * - Same normalization (ADC_MAX_GLOBAL, RAW_WINDOW_SIZE)
+ *
+ * @param raw_data 2D array [CSV_NUM_SENSORS][RAW_WINDOW_SIZE]
+ * @param output_features Output array [CSV_NUM_FEATURES]
  */
-void extract_features_from_local_buffer(float raw_data[NUM_SENSORS][RAW_WINDOW_SIZE],
+void extract_features_from_local_buffer(float raw_data[CSV_NUM_SENSORS][RAW_WINDOW_SIZE],
                                         float* output_features) {
   int feat_idx = 0;
 
-  // Process each sensor
-  for (int s = 0; s < NUM_SENSORS; s++) {
+  // DIAGNOSTIC: Enable detailed logging for first window
+  // TEMPORARILY DISABLED - conflicts with binary protocol
+  static bool first_window_logged = false;
+  bool enable_logging = false;  // Set to true to enable ESP32-side diagnostics
+
+  if (enable_logging) {
+    Serial.println("\n=== DIAGNOSTIC: Feature Extraction Pipeline ===");
+  }
+
+  // Process each sensor (8 sensors for CSV replay)
+  for (int s = 0; s < CSV_NUM_SENSORS; s++) {
     float* data = raw_data[s];
+
+    // DIAGNOSTIC: Log raw ADC values (first 5 samples per sensor)
+    if (enable_logging && s < 2) {  // Only log first 2 sensors to save space
+      Serial.printf("\nSensor %d - Raw ADC (first 5): ", s);
+      for (int i = 0; i < 5; i++) {
+        Serial.printf("%.2f ", data[i]);
+      }
+      Serial.println();
+    }
 
     // STEP 1: Calculate DC offset (mean value)
     float mean = 0.0f;
@@ -136,6 +173,11 @@ void extract_features_from_local_buffer(float raw_data[NUM_SENSORS][RAW_WINDOW_S
       mean += data[i];
     }
     mean /= RAW_WINDOW_SIZE;
+
+    // DIAGNOSTIC: Log DC offset
+    if (enable_logging && s < 2) {
+      Serial.printf("Sensor %d - DC offset (mean): %.4f\n", s, mean);
+    }
 
     // STEP 2: Initialize feature accumulators
     float mav = 0.0f;
@@ -162,8 +204,7 @@ void extract_features_from_local_buffer(float raw_data[NUM_SENSORS][RAW_WINDOW_S
         // Check if sign changed AND difference is significant
         if ((centered > 0 && prev_centered < 0) ||
             (centered < 0 && prev_centered > 0)) {
-          float threshold = 15.0f;  // ZC_THRESHOLD_ADC from functions.cpp
-          if (fabs(centered - prev_centered) >= threshold) {
+          if (fabs(centered - prev_centered) >= ZC_THRESHOLD_ADC) {
             zc++;
           }
         }
@@ -176,8 +217,7 @@ void extract_features_from_local_buffer(float raw_data[NUM_SENSORS][RAW_WINDOW_S
         float right_slope = centered - next_centered;
         float product = left_slope * right_slope;
 
-        float threshold = 15.0f;  // SSC_THRESHOLD_ADC from functions.cpp
-        if (product >= threshold) {
+        if (product >= SSC_THRESHOLD_ADC) {
           ssc++;
         }
       }
@@ -188,13 +228,26 @@ void extract_features_from_local_buffer(float raw_data[NUM_SENSORS][RAW_WINDOW_S
     // STEP 4: Calculate final feature values
     mav /= RAW_WINDOW_SIZE;
 
-    // STEP 5: Apply GLOBAL normalization (using ADC range)
-    mav = mav / ADC_MAX_GLOBAL;  // Normalize to [0,1]
-    wl = wl / (ADC_MAX_GLOBAL * RAW_WINDOW_SIZE);  // Match Python
+    // DIAGNOSTIC: Log raw TD4 features BEFORE normalization
+    if (enable_logging && s < 2) {
+      Serial.printf("Sensor %d - Raw TD4 (before norm): MAV=%.4f, WL=%.2f, ZC=%d, SSC=%d\n",
+                    s, mav, wl, zc, ssc);
+    }
 
-    // ZC and SSC normalized to rate
+    // STEP 5: Apply GLOBAL normalization (using ADC range from functions.h)
+    // CRITICAL: Must match functions.cpp::extract_features_from_raw() and Python pipeline
+    mav = mav / ADC_MAX_GLOBAL;  // Normalize to [0,1]
+    wl = wl / (ADC_MAX_GLOBAL * RAW_WINDOW_SIZE);  // Normalize by 4095 × 250
+
+    // ZC and SSC normalized to rate (counts per sample)
     float zc_normalized = (float)zc / RAW_WINDOW_SIZE;
     float ssc_normalized = (float)ssc / RAW_WINDOW_SIZE;
+
+    // DIAGNOSTIC: Log normalized TD4 features
+    if (enable_logging && s < 2) {
+      Serial.printf("Sensor %d - Normalized TD4: MAV=%.6f, WL=%.6f, ZC=%.6f, SSC=%.6f\n",
+                    s, mav, wl, zc_normalized, ssc_normalized);
+    }
 
     // STEP 6: Store features (order MUST match Python training!)
     output_features[feat_idx++] = mav;
@@ -202,46 +255,57 @@ void extract_features_from_local_buffer(float raw_data[NUM_SENSORS][RAW_WINDOW_S
     output_features[feat_idx++] = zc_normalized;
     output_features[feat_idx++] = ssc_normalized;
   }
+
+  // DIAGNOSTIC: Mark first window as logged
+  if (enable_logging) {
+    first_window_logged = true;
+    Serial.println("=== END DIAGNOSTIC ===\n");
+  }
 }
 
 /**
- * Calculate checksum for data integrity
- *
- * @param data Pointer to data array
- * @param len Number of uint16_t values
- * @return Checksum (sum % 65536)
+ * Calculate checksum for sample packet
+ * 
+ * @param sensors Array of 8 sensor values (uint16_t)
+ * @return Checksum (sum of bytes % 65536)
  */
-uint16_t calculate_checksum(const uint16_t* data, size_t len) {
+uint16_t calculate_sample_checksum(const uint16_t* sensors) {
   uint32_t sum = 0;
-  for (size_t i = 0; i < len; i++) {
-    sum += data[i];
+  const uint8_t* byteData = (const uint8_t*)sensors;
+  size_t byteLen = 8 * 2;  // 8 sensors × 2 bytes
+  
+  for (size_t i = 0; i < byteLen; i++) {
+    sum += byteData[i];
   }
   return (uint16_t)(sum % 65536);
 }
 
 /**
- * Receive window packet from Python via serial
- *
- * @param packet Pointer to WindowPacket structure
- * @return true if packet received and validated successfully
+ * Receive single sample from Python via serial and add to circular buffer
+ * 
+ * This function simulates real-time ADC sample arrival. When 250 samples
+ * are collected (one complete window), it sets window_ready flag.
+ * 
+ * @param packet Pointer to SamplePacket structure
+ * @return true if sample received and validated successfully
  */
-bool receive_window(WindowPacket* packet) {
-  // Wait for header sync bytes (0xA5, 0x5A)
+bool receive_sample(SamplePacket* packet) {
+  // Wait for header sync bytes (0xAA, 0x55)
   unsigned long timeout_start = millis();
   constexpr unsigned long TIMEOUT_MS = 5000;  // 5 second timeout
 
   while (millis() - timeout_start < TIMEOUT_MS) {
     if (Serial.available() >= 2) {
       uint8_t byte1 = Serial.read();
-      if (byte1 == 0xA5) {
+      if (byte1 == 0xAA) {
         uint8_t byte2 = Serial.peek();
-        if (byte2 == 0x5A) {
+        if (byte2 == 0x55) {
           // Header found, read full packet
           packet->header[0] = byte1;
           packet->header[1] = Serial.read();
 
-          // Read remaining packet (3005 bytes)
-          size_t remaining = sizeof(WindowPacket) - 2;
+          // Read remaining packet (19 bytes)
+          size_t remaining = sizeof(SamplePacket) - 2;
           uint8_t* buf = (uint8_t*)packet + 2;
 
           // Read with timeout
@@ -254,76 +318,74 @@ bool receive_window(WindowPacket* packet) {
           }
 
           if (bytes_read < remaining) {
-            Serial.printf("ERROR: Incomplete packet (got %d/%d bytes)\n",
-                         bytes_read + 2, sizeof(WindowPacket));
+            // Incomplete packet - silently return false
             return false;
           }
 
           // Validate checksum
-          uint16_t expected_checksum = calculate_checksum(packet->data, 250 * 6);
+          uint16_t expected_checksum = calculate_sample_checksum(packet->sensors);
           if (packet->checksum != expected_checksum) {
-            Serial.printf("ERROR: Checksum mismatch (got 0x%04X, expected 0x%04X)\n",
-                         packet->checksum, expected_checksum);
+            // Checksum mismatch - silently return false
             return false;
           }
 
-          // Validate window size
-          if (packet->window_size != 250) {
-            Serial.printf("ERROR: Invalid window size (got %d, expected 250)\n",
-                         packet->window_size);
-            return false;
+          // Sample validated - add to circular buffer
+          for (int sensor = 0; sensor < CSV_NUM_SENSORS; sensor++) {
+            raw_sensor_data_local[sensor][buffer_write_index] = (float)packet->sensors[sensor];
           }
 
-          return true;  // Packet valid
+          // Store ground truth (first sample in window sets it)
+          if (samples_collected == 0) {
+            window_ground_truth = packet->ground_truth;
+          }
+
+          // Increment counters
+          buffer_write_index++;
+          samples_collected++;
+
+          // Check if window is complete
+          if (samples_collected >= RAW_WINDOW_SIZE) {
+            window_ready = true;
+            buffer_write_index = 0;  // Reset for next window
+            samples_collected = 0;
+          }
+
+          return true;  // Sample received and added to buffer
         }
       }
     }
   }
 
-  Serial.println("ERROR: Timeout waiting for window packet");
+  // Timeout - no sample received
   return false;
 }
 
 /**
  * Send response packet to Python via serial
  *
+ * CRITICAL FIX: Checksum calculation matches Python's byte-based approach
+ * Python expects: sum of ALL bytes before checksum field (134 bytes)
+ * - predicted_gesture (1 byte)
+ * - confidence (4 bytes)
+ * - features (128 bytes = 32 × float32)
+ * - ground_truth (1 byte)
+ *
  * @param response Pointer to ResponsePacket structure
  */
 void send_response(ResponsePacket* response) {
-  // Calculate checksum (sum of all feature values)
+  // Calculate checksum: sum of all data bytes before checksum field
+  const uint8_t* data = (const uint8_t*)response;
+  size_t checksum_offset = offsetof(ResponsePacket, checksum);
+
   uint32_t sum = 0;
-  for (int i = 0; i < 24; i++) {
-    // Convert float to uint32 for checksum (preserve bits)
-    uint32_t bits;
-    memcpy(&bits, &response->features[i], sizeof(float));
-    sum += bits;
+  for (size_t i = 2; i < checksum_offset; i++) {  // Skip header
+    sum += data[i];
   }
   response->checksum = (uint16_t)(sum % 65536);
 
   // Send entire packet
   Serial.write((uint8_t*)response, sizeof(ResponsePacket));
-  Serial.flush();  // Ensure transmission complete
-}
-
-/**
- * Populate local raw_sensor_data buffer from window packet
- *
- * This bypasses real-time ADC reading and DSP filtering.
- * The CSV data is already clean/filtered, so we directly populate
- * our local buffer for feature extraction.
- *
- * @param packet Pointer to WindowPacket containing ADC data
- */
-void populate_raw_buffer(const WindowPacket* packet) {
-  // Window packet data layout: [S1[0], S2[0], ..., S6[0], S1[1], S2[1], ..., S6[1], ...]
-  // Reorganize into: raw_sensor_data_local[sensor][sample]
-
-  for (int sample = 0; sample < 250; sample++) {
-    for (int sensor = 0; sensor < 6; sensor++) {
-      int index = sample * 6 + sensor;
-      raw_sensor_data_local[sensor][sample] = (float)packet->data[index];
-    }
-  }
+  Serial.flush();
 }
 
 // =============================================================================
@@ -411,13 +473,13 @@ void setup() {
   Serial.printf("Input tensor shape: [%d]\n", input->dims->data[1]);
   Serial.printf("Output tensor shape: [%d]\n", output->dims->data[1]);
 
-  // Verify tensor dimensions
-  if (input->dims->data[1] != NUM_FEATURES) {
+  // Verify tensor dimensions (8 sensors = 32 features)
+  if (input->dims->data[1] != CSV_NUM_FEATURES) {
     Serial.printf("❌ ERROR: Input tensor size mismatch (got %d, expected %d)\n",
-                  input->dims->data[1], NUM_FEATURES);
+                  input->dims->data[1], CSV_NUM_FEATURES);
   }
-  if (output->dims->data[1] != 11) {
-    Serial.printf("❌ ERROR: Output tensor size mismatch (got %d, expected 11)\n",
+  if (output->dims->data[1] != 7) {
+    Serial.printf("❌ ERROR: Output tensor size mismatch (got %d, expected 7)\n",
                   output->dims->data[1]);
   }
 
@@ -429,125 +491,139 @@ void setup() {
 
 void loop() {
   // Prepare packet structures
-  static WindowPacket window_packet;
+  static SamplePacket sample_packet;
   static ResponsePacket response_packet;
 
   // Initialize response header
   response_packet.header[0] = 0xB5;
   response_packet.header[1] = 0x6B;
 
-  // Receive window packet from Python
-  if (receive_window(&window_packet)) {
-    unsigned long start_time = micros();
+  // Receive samples one-by-one (simulates real-time ADC)
+  if (receive_sample(&sample_packet)) {
+    // Sample successfully added to circular buffer
+    // Check if we have a complete window
+    
+    if (window_ready) {
+      // --- WINDOW COMPLETE - START INFERENCE ---
+      window_ready = false;  // Reset flag
 
-    Serial.println("----------------------------------------");
-    Serial.printf("Window received: GT=%d (%s), Size=%d\n",
-                  window_packet.ground_truth,
-                  window_packet.ground_truth < 11 ? gesture_names[window_packet.ground_truth] : "Unknown",
-                  window_packet.window_size);
+      // DIAGNOSTIC: Track window count
+      // TEMPORARILY DISABLED - conflicts with binary protocol
+      static uint32_t window_count = 0;
+      window_count++;
+      bool enable_model_logging = false;  // Set to true to enable ESP32-side model diagnostics
 
-    // Populate raw_sensor_data buffer from packet
-    populate_raw_buffer(&window_packet);
-    Serial.println("✓ Buffer populated (250 samples × 6 sensors)");
+      // 1. Extract features from the complete window
+      float features[CSV_NUM_FEATURES];
+      extract_features_from_local_buffer(raw_sensor_data_local, features);
 
-    // Extract features using our local buffer (DC removal + TD4)
-    float features[NUM_FEATURES];
-    extract_features_from_local_buffer(raw_sensor_data_local, features);
-    Serial.println("✓ Features extracted (24 TD4 features)");
+      // DIAGNOSTIC: Log input tensor information (first window only)
+      if (enable_model_logging) {
+        Serial.println("\n=== DIAGNOSTIC: Model Input/Output ===");
+        Serial.printf("Input tensor type: %s\n",
+                      input->type == kTfLiteFloat32 ? "Float32" :
+                      input->type == kTfLiteInt8 ? "Int8" : "Unknown");
 
-    // Display extracted features (for debugging)
-    Serial.println("Features by sensor:");
-    const char* td4_names[] = {"MAV", "WL", "ZC", "SSC"};
-    for (int sensor = 0; sensor < 6; sensor++) {
-      Serial.printf("  EMG%d: ", sensor + 1);
-      for (int feat = 0; feat < 4; feat++) {
-        int idx = sensor * 4 + feat;
-        Serial.printf("%s=%.4f ", td4_names[feat], features[idx]);
+        if (input->type == kTfLiteInt8) {
+          Serial.printf("Input quantization: scale=%.8f, zero_point=%d\n",
+                        input->params.scale, input->params.zero_point);
+        }
+
+        Serial.println("\nAll 32 feature values (to be fed to model):");
+        for (int i = 0; i < CSV_NUM_FEATURES; i++) {
+          Serial.printf("  F[%2d]: %.8f", i, features[i]);
+          if (i % 4 == 3) Serial.println();  // New line every 4 features
+        }
+        Serial.println();
       }
-      Serial.println();
-    }
 
-    // Copy features to TFLite input tensor (Float32 - direct copy)
-    for (int i = 0; i < NUM_FEATURES; i++) {
-      input->data.f[i] = features[i];
-    }
+      // 2. Copy features to TFLite input tensor
+      for (int i = 0; i < CSV_NUM_FEATURES; i++) {
+        input->data.f[i] = features[i];
+      }
 
-    // Run inference
-    TfLiteStatus invoke_status = interpreter->Invoke();
-    if (invoke_status != kTfLiteOk) {
-      error_reporter->Report("Invoke failed");
-      Serial.println("❌ ERROR: TFLite inference failed");
+      // 3. Run inference
+      TfLiteStatus invoke_status = interpreter->Invoke();
+      if (invoke_status != kTfLiteOk) {
+        // Inference failed - send error response
+        response_packet.predicted_gesture = 255;
+        response_packet.confidence = 0.0f;
+        memset(response_packet.features, 0, sizeof(response_packet.features));
+        response_packet.ground_truth = window_ground_truth;
+        send_response(&response_packet);
+        return;
+      }
 
-      // Send error response
-      response_packet.predicted_gesture = 255;  // Invalid
-      response_packet.confidence = 0.0f;
-      memset(response_packet.features, 0, sizeof(response_packet.features));
-      response_packet.ground_truth = window_packet.ground_truth;
+      // 4. Find highest confidence prediction
+      int predicted_gesture = 0;
+      float max_confidence = output->data.f[0];
+
+      // DIAGNOSTIC: Log output tensor information
+      if (enable_model_logging) {
+        Serial.printf("\nOutput tensor type: %s\n",
+                      output->type == kTfLiteFloat32 ? "Float32" :
+                      output->type == kTfLiteInt8 ? "Int8" : "Unknown");
+
+        if (output->type == kTfLiteInt8) {
+          Serial.printf("Output quantization: scale=%.8f, zero_point=%d\n",
+                        output->params.scale, output->params.zero_point);
+        }
+
+        Serial.println("\nModel output probabilities (all 7 gestures):");
+      }
+
+      for (int i = 1; i < 7; i++) {
+        float prob = output->data.f[i];
+
+        // DIAGNOSTIC: Log each probability
+        if (enable_model_logging) {
+          Serial.printf("  Gesture[%2d]: %.6f", i, prob);
+          if (prob == max_confidence) Serial.print(" <- MAX");
+          Serial.println();
+        }
+
+        if (prob > max_confidence) {
+          max_confidence = prob;
+          predicted_gesture = i;
+        }
+      }
+
+      // DIAGNOSTIC: Log first gesture probability (already set as max_confidence initially)
+      if (enable_model_logging) {
+        Serial.printf("  Gesture[%2d]: %.6f", 0, output->data.f[0]);
+        if (output->data.f[0] == max_confidence) Serial.print(" <- MAX");
+        Serial.println();
+      }
+
+      // Apply confidence threshold
+      if (max_confidence < 0.3f) {
+        predicted_gesture = 255;  // No prediction
+      }
+
+      // DIAGNOSTIC: Log final prediction
+      if (enable_model_logging) {
+        Serial.printf("\nFinal prediction: Gesture %d (confidence=%.6f, threshold=0.3)\n",
+                      predicted_gesture, max_confidence);
+        Serial.printf("Ground truth (from packet): %d\n", window_ground_truth);
+        Serial.println("=== END DIAGNOSTIC ===\n");
+      }
+
+      // 5. Populate response packet
+      response_packet.predicted_gesture = (uint8_t)predicted_gesture;
+      response_packet.confidence = max_confidence;
+      memcpy(response_packet.features, features, sizeof(float) * CSV_NUM_FEATURES);
+      response_packet.ground_truth = window_ground_truth;
+
+      // 6. Send binary response to Python
       send_response(&response_packet);
-      return;
     }
-    Serial.println("✓ Inference complete");
-
-    // Display output probabilities
-    Serial.print("Probabilities: ");
-    for (int i = 0; i < 11; i++) {
-      float prob = output->data.f[i];
-      Serial.printf("%.3f ", prob);
-    }
-    Serial.println();
-
-    // Find highest confidence prediction (threshold = 0.8)
-    int predicted_gesture = 255;  // Default: no prediction
-    float max_confidence = 0.8f;  // Confidence threshold
-
-    for (int i = 0; i < 11; i++) {
-      float prob = output->data.f[i];
-      if (prob > max_confidence) {
-        max_confidence = prob;
-        predicted_gesture = i;
-      }
-    }
-
-    // Populate response packet
-    response_packet.predicted_gesture = (uint8_t)predicted_gesture;
-    response_packet.confidence = max_confidence;
-    memcpy(response_packet.features, features, sizeof(float) * NUM_FEATURES);
-    response_packet.ground_truth = window_packet.ground_truth;
-
-    // Display result
-    if (predicted_gesture != 255) {
-      Serial.printf("PREDICTION: %s (confidence: %.3f)\n",
-                    gesture_names[predicted_gesture], max_confidence);
-
-      bool correct = (predicted_gesture == window_packet.ground_truth);
-      Serial.printf("Ground Truth: %s → %s\n",
-                    gesture_names[window_packet.ground_truth],
-                    correct ? "✓ CORRECT" : "✗ INCORRECT");
-    } else {
-      Serial.println("PREDICTION: None (below threshold)");
-    }
-
-    unsigned long elapsed = micros() - start_time;
-    Serial.printf("Processing time: %lu μs (%.2f ms)\n", elapsed, elapsed / 1000.0);
-
-    // Send response to Python
-    send_response(&response_packet);
-    Serial.println("✓ Response sent");
-    Serial.println("Ready for next window...\n");
-
+    // If window not ready yet, continue collecting samples
   } else {
-    // Packet receive failed - error already logged
-    // Send minimal error response to keep Python in sync
-    response_packet.predicted_gesture = 255;
-    response_packet.confidence = 0.0f;
-    memset(response_packet.features, 0, sizeof(response_packet.features));
-    response_packet.ground_truth = 255;
-    send_response(&response_packet);
-
+    // Failed to receive sample - could be timeout or checksum error
     // Flush serial buffer to resync
     while (Serial.available()) {
       Serial.read();
     }
-    delay(100);  // Brief pause before retry
+    delay(10);  // Brief pause
   }
 }

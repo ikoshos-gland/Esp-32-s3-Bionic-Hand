@@ -41,10 +41,7 @@
 extern ServoController servoController;
 #endif
 
-// TD4 thresholds in ADC units (NOT normalized values)
-// CHANGED: Using ADC units for raw signal processing (was 0.01 for normalized RMS)
-#define ZC_THRESHOLD_ADC  15.0f   // ADC units - reduces noise-induced crossings
-#define SSC_THRESHOLD_ADC 15.0f   // ADC units - reduces noise sensitivity
+// TD4 thresholds moved to functions.h for sharing with csv_replay.cpp
 
 // Raw signal buffers for 6 EMG sensors (RAW_WINDOW_SIZE samples each)
 // CHANGED: Storing raw ADC values instead of RMS windows
@@ -195,23 +192,25 @@ float* prelim_collection() {
   // Collect RAW_WINDOW_SIZE raw samples from all 6 sensors
   for (int i = 0; i < RAW_WINDOW_SIZE; i++) {
     // Read raw ADC values (0-4095 on ESP32 12-bit ADC) and apply DSP filters
-    // CRITICAL FIX: DSP filters (HPF) can output NEGATIVE values (DC offset removal)
-    // Casting negative float to uint16_t causes OVERFLOW → Clamp to [0, 4095]
-    
+    // CRITICAL: DSP filters (HPF) output BIPOLAR signals centered at 0 (e.g., -500 to +500)
+    // DO NOT constrain to [0, 4095] - this causes HALF-WAVE RECTIFICATION (clips negatives to 0)
+    // raw_sensor_data is float[], so we can store negative values directly
+
     float filtered1 = filter_sample(0, (float)analogRead(pin_MW1));
     float filtered2 = filter_sample(1, (float)analogRead(pin_MW2));
     float filtered3 = filter_sample(2, (float)analogRead(pin_MW3));
     float filtered4 = filter_sample(3, (float)analogRead(pin_MW4));
     float filtered5 = filter_sample(4, (float)analogRead(pin_MW5));
     float filtered6 = filter_sample(5, (float)analogRead(pin_MW6));
-    
-    // Clamp to 12-bit ADC range [0, 4095] to prevent overflow in feature extraction
-    raw_sensor_data[0][i] = constrain(filtered1, 0.0f, 4095.0f);
-    raw_sensor_data[1][i] = constrain(filtered2, 0.0f, 4095.0f);
-    raw_sensor_data[2][i] = constrain(filtered3, 0.0f, 4095.0f);
-    raw_sensor_data[3][i] = constrain(filtered4, 0.0f, 4095.0f);
-    raw_sensor_data[4][i] = constrain(filtered5, 0.0f, 4095.0f);
-    raw_sensor_data[5][i] = constrain(filtered6, 0.0f, 4095.0f);
+
+    // Store filtered values directly (preserve full bipolar waveform)
+    // Feature extraction (extract_features_from_raw) will handle DC offset removal
+    raw_sensor_data[0][i] = filtered1;
+    raw_sensor_data[1][i] = filtered2;
+    raw_sensor_data[2][i] = filtered3;
+    raw_sensor_data[3][i] = filtered4;
+    raw_sensor_data[4][i] = filtered5;
+    raw_sensor_data[5][i] = filtered6;
 
     // Update servos every 10 samples (~10ms interval) for smooth motion
     #ifdef REAL_TIME_INFERENCE_MODE
