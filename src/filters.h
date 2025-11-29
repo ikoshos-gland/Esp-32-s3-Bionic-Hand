@@ -36,9 +36,15 @@
 #define POWERLINE_FREQ_HZ 50
 
 // Enable/disable individual filters (1 = enabled, 0 = disabled)
-#define ENABLE_HPF         1  // High-pass filter (20 Hz)
-#define ENABLE_LPF         1  // Low-pass filter (450 Hz)
-#define ENABLE_NOTCH       1  // Notch filter (50/60 Hz)
+#ifdef BYPASS_DSP_FILTERS
+  #define ENABLE_HPF         0  // DISABLED in CSV replay
+  #define ENABLE_LPF         0  // DISABLED in CSV replay
+  #define ENABLE_NOTCH       0  // DISABLED in CSV replay
+#else
+  #define ENABLE_HPF         1  // Enabled in production
+  #define ENABLE_LPF         1
+  #define ENABLE_NOTCH       1
+#endif
 #define ENABLE_MOVING_AVG  0  // Moving average (adds latency, disabled by default)
 
 // Number of EMG sensors
