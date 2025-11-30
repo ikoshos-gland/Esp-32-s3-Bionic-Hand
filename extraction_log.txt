@@ -1,0 +1,73 @@
+Loading data from: data_acquisition/data/training_data_S3_20251125_002634.csv
+Loaded 1271687 samples
+Columns: ['Timestamp', 'Seq', 'Movement', 'Phase', 'Rep', 'EMG1', 'EMG2', 'EMG3', 'EMG4', 'EMG5', 'EMG6']
+TD4 Feature Extractor initialized (RAW signal processing):
+  Window size: 250ms (500 samples)
+  Overlap: 125ms (250 samples)
+  Hop size: 250 samples
+  ZC threshold: 15.0 ADC units
+  SSC threshold: 15.0 ADC units
+  ADC max (global norm): 4095.0
+
+Extracting TD4 features from 1271687 samples...
+Sensors: ['EMG1', 'EMG2', 'EMG3', 'EMG4', 'EMG5', 'EMG6']
+
+Extracted 5085 windows (before filtering)
+Feature shape: (5085, 24)
+
+============================================================
+CLEANING DATA: Removing 'HAZIRLIK' (preparation) phase
+============================================================
+  Removed 0 'HAZIRLIK' samples
+  Remaining: 5085 samples
+
+============================================================
+BALANCING CLASSES: Equalizing 'Rest' with other gestures
+============================================================
+
+Class distribution (before balancing):
+  Fist: 289 samples (5.7%)
+  Grasp: 289 samples (5.7%)
+  OK: 287 samples (5.6%)
+  Open: 288 samples (5.7%)
+  Pinch: 284 samples (5.6%)
+  Point: 287 samples (5.6%)
+  Rest: 2209 samples (43.4%)
+  ThumbDn: 288 samples (5.7%)
+  ThumbUp: 289 samples (5.7%)
+  Victory: 288 samples (5.7%)
+  WristFlex: 287 samples (5.6%)
+
+Balancing 'Rest' class:
+  Current count: 2209
+  Target count (median of other classes): 288
+  Downsampled 'Rest' from 2209 to 288
+  Total samples after balancing: 3164
+
+Final class distribution (after cleaning and balancing):
+  Fist: 289 samples (9.1%)
+  Grasp: 289 samples (9.1%)
+  OK: 287 samples (9.1%)
+  Open: 288 samples (9.1%)
+  Pinch: 284 samples (9.0%)
+  Point: 287 samples (9.1%)
+  Rest: 288 samples (9.1%)
+  ThumbDn: 288 samples (9.1%)
+  ThumbUp: 289 samples (9.1%)
+  Victory: 288 samples (9.1%)
+  WristFlex: 287 samples (9.1%)
+
+Final feature shape: (3164, 24)
+Total features per window: 24
+============================================================
+
+
+Features saved to: data/features\training_data_S3_20251125_002634_td4_features.npz
+Features shape: (3164, 24)
+Unique labels: ['Fist' 'Grasp' 'OK' 'Open' 'Pinch' 'Point' 'Rest' 'ThumbDn' 'ThumbUp'
+ 'Victory' 'WristFlex']
+
+============================================================
+TD4 Feature extraction complete!
+Output: data/features\training_data_S3_20251125_002634_td4_features.npz
+============================================================
