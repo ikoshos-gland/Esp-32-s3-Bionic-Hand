@@ -18,12 +18,12 @@ Real-time gesture classification system for **ESP32-S3 DevKitC-1** using TensorF
 - **Serial Port:** COM11 (921600 baud) - Update in [platformio.ini](platformio.ini) if different
 - **MPU6050:** NOT USED (IMU removed from system - EMG-only)
 - **ADC Pins (6 EMG Sensors):**
-  - GPIO4  → MW1 (EMG Sensor 1) - ADC1_CH1
-  - GPIO5  → MW2 (EMG Sensor 2) - ADC1_CH2
-  - GPIO6  → MW3 (EMG Sensor 3) - ADC1_CH3
-  - GPIO7  → MW4 (EMG Sensor 4) - ADC1_CH4
-  - GPIO15 → MW5 (EMG Sensor 5) - ADC1_CH5
-  - GPIO16 → MW6 (EMG Sensor 6) - ADC1_CH6
+  - GPIO4  → MW1 (EMG Sensor 1) - ADC1_CH3
+  - GPIO5  → MW2 (EMG Sensor 2) - ADC1_CH4
+  - GPIO6  → MW3 (EMG Sensor 3) - ADC1_CH5
+  - GPIO7  → MW4 (EMG Sensor 4) - ADC1_CH6
+  - GPIO15 → MW5 (EMG Sensor 5) - ADC1_CH6
+  - GPIO16 → MW6 (EMG Sensor 6) - ADC2_CH5
 
 **⚠️ Pin Change Warning:**
 - **GPIO pins changed from 0-5 to 4-7, 15-16** to avoid UART0 conflicts

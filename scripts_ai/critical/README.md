@@ -47,7 +47,7 @@ Ham EMG Verileri (CSV) → TD4 Özellikler (NPZ) → TFLite Model + C++ Header
 ### **Aşama 1: Veri Toplama** (bu klasörün dışında)
 ```bash
 # ESP32'den 6 EMG sensörü verisi toplama
-python data_acquisition/scripts/training_collection.py
+python data_acquisition/scripts/training_collection_new.py
 ```
 **Çıktı:** `data/training_data_YYYYMMDD_HHMMSS.csv`
 

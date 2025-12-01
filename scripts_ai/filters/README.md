@@ -22,176 +22,445 @@ Bu klasör, EMG sinyallerini işlemek için kullanılan **dijital sinyal işleme
 
 ---
 
-## 🎯 Klasör Amacı
+## 1️⃣ dsp_filters.py
 
-**Problem:** Ham EMG sinyalleri gürültülüdür!
+### 🎯 Amacı
+**Python tarafında** EMG sinyallerini filtrelemek için IIR filter bank sağlar.
 
-```
-Ham ADC Sinyali = EMG + DC Offset + Motion Artifacts + Powerline Noise + Electronic Noise
-                  ^^^   ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^
-                  İstenen  0-20 Hz     0-10 Hz           50/60 Hz          >500 Hz
-```
+### 🔬 Filtre Spesifikasyonları
 
-**Çözüm:** Cascaded IIR Filter Bank
+| Filtre | Tip | Frekans | Order | Amaç |
+|--------|-----|---------|-------|------|
+| **HPF** | High-Pass Butterworth | 20 Hz | 4th | DC offset + hareket artefaktı |
+| **LPF** | Low-Pass Butterworth | 450 Hz | 4th | Yüksek frekans gürültü |
+| **Notch** | IIR Notch | 50/60 Hz | 2nd | Powerline gürültüsü |
 
-```
-Ham ADC → HPF (20 Hz) → LPF (450 Hz) → Notch (50/60 Hz) → Temiz EMG
-```
-
-**Bu klasörün görevi:**
-1. **Python filter bank** sağlamak (eğitim için)
-2. **C++ coefficient generator** sağlamak (ESP32 için)
-3. **İki implementasyonun tutarlılığını** garantilemek
+**Cascade:** HPF → LPF → Notch
 
 ---
 
-## 🚨 Neden DSP Filtreleri?
+### ⚙️ SOS (Second-Order Sections) Format
 
-### **Probleme Bakış**
+**Neden SOS?**  
+- Yüksek order IIR filtrelerde **sayısal kararlılık** sağlar
+- Python `scipy.signal` ile doğrudan uyumlu
+- Biquad cascade olarak C++'a kolayca dönüştürülebilir
 
-EMG sensörlerinden gelen ham ADC değerleri birçok gürültü kaynağı içerir:
+---
 
-| Gürültü Türü | Frekans Bandı | Kaynak | Etkisi |
-|--------------|---------------|--------|--------|
-| **DC Offset** | 0 Hz | Elektrode-deri kontağı | Sinyal 2048 civarında merkez kaymış |
-| **Motion Artifacts** | 0-20 Hz | Kablo hareketi, kas titremesi | Baseline wander (yavaş salınım) |
-| **EMG Sinyali** | **20-450 Hz** | **Kas kasılması (İSTENİR!)** | **Bilgi burada!** |
-| **Powerline Noise** | 50/60 Hz | AC elektrik şebekesi | Güçlü sinüzoidal interferans |
-| **Electronic Noise** | >500 Hz | ADC, kablolama, dijital gürültü | Yüksek frekanslı rastgele gürültü |
+### 🚀 Kullanım
 
-### **Filtrelemeden Önce vs Sonra**
-
-**Filtrelemeden Önce:**
+#### NumPy Array ile
 ```python
-# Ham ADC verisi
-signal = [2048, 2150, 2100, 2200, 1950, 2050, ...]  # Gürültülü
-mean = 2048  # DC offset hala mevcut
-std = 250    # Yüksek varyans (gürültü dominant)
+from filters.dsp_filters import EMGFilterBank
 
-# TD4 özellikleri güvenilmez:
-ZC = 45   # Çok fazla (gürültü sıfırı sık geçiyor)
-SSC = 38  # Çok fazla (rastgele tepe/vadi)
+# Filter bank oluştur
+filter_bank = EMGFilterBank(
+    sampling_rate=2000,      # Hz
+    powerline_freq=50,       # 50 Hz (Avrupa) veya 60 Hz (Amerika)
+    enable_hpf=True,
+    enable_lpf=True,
+    enable_notch=True
+)
+
+# 1D veya 2D array filtrele
+filtered_signal = filter_bank.filter_signal(raw_emg_data)
 ```
 
-**Filtrelemeden Sonra:**
+#### Pandas DataFrame ile
 ```python
-# Filtrelenmiş sinyal
-signal = [-50, 120, -30, 80, -60, 40, ...]  # Temiz EMG bandı
-mean = 0    # DC offset kaldırılmış
-std = 85    # Düşük varyans (sadece EMG)
+import pandas as pd
+from filters.dsp_filters import EMGFilterBank
 
-# TD4 özellikleri güvenilir:
-ZC = 12   # Doğru frekans tahmini
-SSC = 10  # Gerçek sinyal karmaşıklığı
+df = pd.read_csv('training_data.csv')
+filter_bank = EMGFilterBank(sampling_rate=2000, powerline_freq=50)
+
+# EMG sütunlarını filtrele
+filtered_df = filter_bank.filter_dataframe(
+    df,
+    sensor_columns=['EMG1', 'EMG2', 'EMG3', 'EMG4', 'EMG5', 'EMG6']
+)
 ```
-
-### **Literatür Desteği**
-
-- **De Luca et al. (2002):** "EMG sinyalleri 20-450 Hz arasında bant sınırlı olmalıdır"
-- **Merletti & Parker (2004):** "Powerline interferansı mutlaka kaldırılmalıdır"
-- **Phinyomark et al. (2012):** "Filtreleme TD4 özellik güvenilirliğini %30 artırır"
 
 ---
 
-## 🎛️ Filtre Türleri
+### 📊 Frekans Yanıtı Analizi
 
-### **1. High-Pass Filter (HPF) - 20 Hz**
+```python
+from filters.dsp_filters import EMGFilterBank
 
-**Amaç:** DC offset ve düşük frekanslı hareket artifacts'ı kaldırır
+filter_bank = EMGFilterBank(sampling_rate=2000, powerline_freq=50)
 
-**Tasarım:**
-- **Türü:** 4th-order Butterworth
-- **Cutoff:** 20 Hz
-- **Attenuation:** -24 dB/octave (çok keskin)
-- **Yapı:** 2 biquad (cascade)
+# Frekans yanıtını görselleştir
+filter_bank.plot_frequency_response(save_path='filter_response.png')
 
-**Neden 20 Hz?**
-- EMG sinyalleri 20 Hz'den başlar
-- Motion artifacts <10 Hz → tamamen bloklanır
-- DC drift (0 Hz) → tamamen kaldırılır
-
-**Frekans Tepkisi:**
-```
-Frequency   Attenuation
----------   -----------
-0 Hz        -∞ dB (DC tamamen bloke)
-10 Hz       -12 dB (baseline drift bastırılır)
-20 Hz       -3 dB (cutoff)
-50 Hz       ~0 dB (EMG bandı geçer)
+# Numerik yanıt al
+freqs, magnitude_db = filter_bank.get_frequency_response(filter_type='cascade')
 ```
 
-### **2. Low-Pass Filter (LPF) - 450 Hz**
-
-**Amaç:** Yüksek frekanslı elektronik gürültüyü kaldırır
-
-**Tasarım:**
-- **Türü:** 4th-order Butterworth
-- **Cutoff:** 450 Hz
-- **Attenuation:** -24 dB/octave
-- **Yapı:** 2 biquad (cascade)
-
-**Neden 450 Hz?**
-- EMG sinyalleri 450 Hz'de sonlanır
-- Yüksek frekanslı gürültü >500 Hz → bloklanır
-- ADC sampling rate 1000 Hz → Nyquist (500 Hz) altında güvenli
-
-**Frekans Tepkisi:**
-```
-Frequency   Attenuation
----------   -----------
-100 Hz      ~0 dB (EMG bandı geçer)
-300 Hz      ~0 dB (EMG bandı geçer)
-450 Hz      -3 dB (cutoff)
-600 Hz      -12 dB (gürültü bastırılır)
-1000 Hz     -24 dB (elektronik gürültü tamamen bloke)
-```
-
-### **3. Notch Filter - 50/60 Hz**
-
-**Amaç:** Powerline interferansını (elektrik şebekesi gürültüsü) kaldırır
-
-**Tasarım:**
-- **Türü:** 2nd-order IIR Notch
-- **Frequency:** 50 Hz (Avrupa/Asya) veya 60 Hz (Amerika)
-- **Q Factor:** 12.5 (dar bant)
-- **Yapı:** 1 biquad
-
-**Neden Notch?**
-- AC elektrik şebekesi çok güçlü sinüzoidal gürültü yaratır
-- 50/60 Hz'de -40 dB attenuation → %99 azaltma
-- Dar bant (Q=12.5) → sadece 50/60 Hz etkilenir, EMG bandı korunur
-
-**Frekans Tepkisi (50 Hz için):**
-```
-Frequency   Attenuation
----------   -----------
-40 Hz       -0.5 dB (EMG bandı minimal etkilenir)
-48 Hz       -3 dB
-50 Hz       -40 dB (powerline tamamen bloke)
-52 Hz       -3 dB
-60 Hz       -0.5 dB (EMG bandı minimal etkilenir)
-```
-
-### **Cascade (Birleşik Filtre)**
-
-**Sıralama:** HPF → LPF → Notch
-
-```
-Ham ADC (0-4095)
-    ↓
-HPF (20 Hz)   → DC ve motion artifacts kaldırılır
-    ↓
-LPF (450 Hz)  → Yüksek frekanslı gürültü kaldırılır
-    ↓
-Notch (50 Hz) → Powerline interferansı kaldırılır
-    ↓
-Temiz EMG (20-450 Hz, powerline-free)
-```
-
-**Toplam Latency:** ~12 ms (4th-order × 2 + 2nd-order)
+**Çıktı:**
+- HPF: -3dB @ 20 Hz
+- LPF: -3dB @ 450 Hz
+- Notch: -40dB @ 50 Hz (Q=12.5)
 
 ---
 
-**Son güncelleme:** 2025-11-30
-**Versiyon:** 1.0
-**Yazar:** ESP32 Bionic Hand Project
+### ⚙️ Parametreler
+
+#### EMGFilterBank.__init__()
+
+| Parametre | Tip | Varsayılan | Açıklama |
+|-----------|-----|------------|----------|
+| `sampling_rate` | int | 2000 | Örnekleme frekansı (Hz) |
+| `powerline_freq` | int | 50 | Powerline frekansı (50/60 Hz) |
+| `enable_hpf` | bool | True | High-pass filtreyi aktif et |
+| `enable_lpf` | bool | True | Low-pass filtreyi aktif et |
+| `enable_notch` | bool | True | Notch filtreyi aktif et |
+| `enable_ma` | bool | False | Moving average (deneysel) |
+
+---
+
+### 🔬 Teknik Detaylar
+
+#### Biquad Cascade
+4th-order Butterworth → 2× Biquad stage
+
+```
+Input → [Biquad Stage 1] → [Biquad Stage 2] → Output
+```
+
+Her biquad:
+```
+         b0 + b1*z^-1 + b2*z^-2
+H(z) = -------------------------
+         1  + a1*z^-1 + a2*z^-2
+```
+
+#### Zero-Phase Filtering
+`scipy.signal.sosfiltfilt()` kullanılır:
+- Forward + backward pass
+- Phase distortion yok
+- **Offline processing için uygundur** (real-time değil)
+
+**Not:** ESP32'de real-time için sadece forward pass yapılır.
+
+---
+
+### ⚠️ C++ Uyumu
+
+**Python ve C++ filtreleri TAM OLARAK aynı sonucu vermeli!**
+
+**Kontrol için:**
+```bash
+python scripts_ai/validation/validate_filters.py
+```
+
+---
+
+## 2️⃣ generate_filter_coefficients.py
+
+### 🎯 Amacı
+ESP32 firmware'i için **C++ formatta** filtre katsayıları üretir.
+
+---
+
+### 🚀 Kullanım
+
+#### 50 Hz Powerline (Avrupa, Asya, Afrika)
+```bash
+python scripts_ai/filters/generate_filter_coefficients.py 50
+```
+
+#### 60 Hz Powerline (Amerika, Japonya)
+```bash
+python scripts_ai/filters/generate_filter_coefficients.py 60
+```
+
+---
+
+### 📤 Çıktı
+
+#### 1. Terminal Output
+Frekans yanıtı özeti ve C++ kodu:
+```
+======================================================================
+1000 Hz SAMPLING RATE
+======================================================================
+
+High-Pass (20 Hz):
+  DC gain: -80.23 dB
+  -3dB cutoff: 20.1 Hz
+
+Low-Pass (450 Hz):
+  Nyquist gain: -60.45 dB
+  -3dB cutoff: 449.8 Hz
+
+...
+```
+
+#### 2. C++ Header Dosyası
+**Dosya:** `../src/filter_coefficients_50hz.h`
+
+```cpp
+// ============================================================================
+// 1000 Hz SAMPLING RATE (Real-Time Inference)
+// ============================================================================
+#ifndef DATA_ACQUISITION_MODE
+
+  // High-Pass Filter - Stage 1
+  const float HPF_STAGE1_B0 = 0.9565436241f;
+  const float HPF_STAGE1_B1 = -1.9130872481f;
+  const float HPF_STAGE1_B2 = 0.9565436241f;
+  const float HPF_STAGE1_A1 = -1.9111970675f;
+  const float HPF_STAGE1_A2 = 0.9149914665f;
+
+  // High-Pass Filter - Stage 2
+  ...
+
+#endif
+```
+
+---
+
+### 🎓 İki Örnekleme Frekansı
+
+**Neden iki set katsayı?**
+
+| Mod | Sampling Rate | Kullanım |
+|-----|---------------|----------|
+| **Data Acquisition** | 2000 Hz | Veri toplama (training için) |
+| **Real-Time Inference** | 1000 Hz | ESP32'de real-time tahmin |
+
+**Firmware tarafında:**
+```cpp
+#ifdef DATA_ACQUISITION_MODE
+    // 2000 Hz coefficients
+#else
+    // 1000 Hz coefficients
+#endif
+```
+
+---
+
+### 📋 Adımlar (Manuel Entegrasyon)
+
+1. **Script'i çalıştır:**
+   ```bash
+   python scripts_ai/filters/generate_filter_coefficients.py 50
+   ```
+
+2. **Çıktıyı kontrol et:**
+   ```
+   ✅ Coefficients saved to: ../src/filter_coefficients_50hz.h
+   ```
+
+3. **C++ projesine ekle:**
+   - Kopyala: `src/filter_coefficients_50hz.h`
+   - Include et: `#include "filter_coefficients_50hz.h"` in `filters.cpp`
+
+4. **Derle ve test et:**
+   ```bash
+   pio run
+   ```
+
+---
+
+### 🔬 Katsayı Hesaplama
+
+#### High-Pass & Low-Pass (Butterworth)
+```python
+from scipy import signal
+
+# 4th-order Butterworth
+sos = signal.butter(
+    N=4,              # Order
+    Wn=20,            # Cutoff frequency (Hz)
+    btype='high',     # 'high' or 'low'
+    fs=sampling_rate, # Sampling frequency
+    output='sos'      # Second-Order Sections
+)
+```
+
+#### Notch Filter
+```python
+# IIR Notch
+b, a = signal.iirnotch(
+    w0=50,            # Notch frequency (Hz)
+    Q=12.5,           # Quality factor
+    fs=sampling_rate
+)
+
+# Convert to SOS
+sos = np.array([[b[0], b[1], b[2], a[0], a[1], a[2]]])
+```
+
+---
+
+### 📊 Frekans Yanıtı Doğrulama
+
+Script otomatik olarak her filtre için:
+- DC gain
+- -3dB cutoff frekansı
+- Nyquist gain
+
+bilgilerini yazdırır.
+
+**Kontrol:**
+- HPF cutoff ≈ 20 Hz
+- LPF cutoff ≈ 450 Hz
+- Notch depth ≈ -40dB @ 50/60 Hz
+
+---
+
+### ⚠️ Önemli Notlar
+
+#### 1. Normalizasyon
+SOS katsayıları **a0 ile normalize edilir:**
+```python
+b0_norm = b0 / a0
+b1_norm = b1 / a0
+b2_norm = b2 / a0
+a1_norm = a1 / a0  # a0 = 1.0
+a2_norm = a2 / a0
+```
+
+C++ tarafında `a0` her zaman 1.0'dır.
+
+#### 2. Float Precision
+**C++:** `float` (32-bit)  
+**Python:** `float64` → `float` casting
+
+Küçük sayısal farklar olabilir (~1e-6), **kabul edilebilir**.
+
+#### 3. Powerline Frekansı
+**Mutlaka doğru frekansı seçin:**
+- Türkiye: **50 Hz** ✅
+- ABD: 60 Hz
+- Japonya: 50 Hz (Doğu), 60 Hz (Batı)
+
+Yanlış frekans → Notch etkisiz kalır!
+
+---
+
+## 🔄 Tam Filtre Workflow
+
+```mermaid
+graph TD
+    A[generate_filter_coefficients.py] -->|50 Hz| B[C++ Header Üret]
+    B --> C[src/filters.cpp]
+    
+    D[dsp_filters.py] -->|Training| E[feature_extraction.py]
+    
+    F[validate_filters.py] -.->|Test| C
+    F -.->|Test| D
+    
+    style A fill:#fff9c4
+    style D fill:#fff9c4
+    style C fill:#c8e6c9
+    style E fill:#e1f5fe
+```
+
+---
+
+## 🧪 Test ve Validasyon
+
+### Python Filtre Testi
+```python
+from filters.dsp_filters import test_filters
+
+# Synthetic EMG sinyali ile test
+test_filters()
+```
+
+**Çıktı:**
+- Frequency response plot
+- Filtered vs. unfiltered karşılaştırma
+
+### Python-C++ Karşılaştırma
+```bash
+python scripts_ai/validation/validate_filters.py
+```
+
+**Beklenen sonuç:**
+```
+✅ HPF test passed (difference < 1e-5)
+✅ LPF test passed (difference < 1e-5)
+✅ Notch test passed (difference < 1e-5)
+```
+
+---
+
+## 📚 Literatür ve Standarlar
+
+### EMG Filtering Best Practices
+
+**Band-Pass (20-450 Hz):**
+- **Lower cutoff (20 Hz):** Hareket artefaktı ve DC offset
+- **Upper cutoff (450 Hz):** EMG yararlı bilgisi 20-450 Hz aralığındadır
+- **Referans:** Merletti & Parker (2004) - "Electromyography: Physiology, Engineering, and Non-Invasive Applications"
+
+**Notch Filter:**
+- **Powerline interference:** 50/60 Hz ve harmonikleri
+- **Q factor (12.5):** Dar bant (sadece 50 Hz), EMG spektrumuna minimal etki
+
+---
+
+## 🐛 Troubleshooting
+
+### Problem: C++ ve Python farklı sonuçlar veriyor
+**Çözüm:**
+1. Katsayıların güncel olduğundan emin olun
+2. Sampling rate doğru mu? (1000 vs 2000 Hz)
+3. `validate_filters.py` çalıştırın
+
+### Problem: Notch filter etkisiz
+**Çözüm:**
+1. Powerline frekansı doğru mu? (50/60 Hz)
+2. Sinyal gerçekten 50 Hz gürültüsü içeriyor mu?
+3. FFT ile kontrol edin
+
+### Problem: Signal distortion (sinyal bozulması)
+**Çözüm:**
+1. Filter order'ı düşürün (4 → 2)
+2. Cutoff frekanslarını ayarlayın
+3. Biquad cascade yerine direct form deneyin
+
+---
+
+## 💡 İpuçları
+
+### Custom Filter Tasarımı
+```python
+from scipy import signal
+
+# Kendi tasarımınızı yapın
+custom_sos = signal.butter(N=2, Wn=30, btype='high', fs=2000, output='sos')
+
+# Filter bank'e manuel ekleyin
+filter_bank = EMGFilterBank(...)
+filter_bank.hpf_sos = custom_sos
+```
+
+### Frequency Response Analizi
+```python
+import matplotlib.pyplot as plt
+from filters.dsp_filters import EMGFilterBank
+
+fb = EMGFilterBank(sampling_rate=2000, powerline_freq=50)
+
+# Her filter için ayrı ayrı
+for filter_type in ['hpf', 'lpf', 'notch', 'cascade']:
+    freqs, mag_db = fb.get_frequency_response(filter_type)
+    plt.plot(freqs, mag_db, label=filter_type)
+
+plt.xlabel('Frequency (Hz)')
+plt.ylabel('Magnitude (dB)')
+plt.legend()
+plt.grid(True)
+plt.show()
+```
+
+---
+
+**Proje:** ESP32-S3 Bionic Hand  
+**Tarih:** 2025

@@ -195,23 +195,25 @@ float* prelim_collection() {
   // Collect RAW_WINDOW_SIZE raw samples from all 6 sensors
   for (int i = 0; i < RAW_WINDOW_SIZE; i++) {
     // Read raw ADC values (0-4095 on ESP32 12-bit ADC) and apply DSP filters
-    // CRITICAL FIX: DSP filters (HPF) can output NEGATIVE values (DC offset removal)
-    // Casting negative float to uint16_t causes OVERFLOW → Clamp to [0, 4095]
-    
+    // CRITICAL: HPF creates BIPOLAR signals (can be negative after DC removal)
+    // Solution: Store as float directly (raw_sensor_data[][] is float, not uint16_t)
+    // DC offset removal in extract_features_from_raw() handles bipolar signals correctly
+
     float filtered1 = filter_sample(0, (float)analogRead(pin_MW1));
     float filtered2 = filter_sample(1, (float)analogRead(pin_MW2));
     float filtered3 = filter_sample(2, (float)analogRead(pin_MW3));
     float filtered4 = filter_sample(3, (float)analogRead(pin_MW4));
     float filtered5 = filter_sample(4, (float)analogRead(pin_MW5));
     float filtered6 = filter_sample(5, (float)analogRead(pin_MW6));
-    
-    // Clamp to 12-bit ADC range [0, 4095] to prevent overflow in feature extraction
-    raw_sensor_data[0][i] = constrain(filtered1, 0.0f, 4095.0f);
-    raw_sensor_data[1][i] = constrain(filtered2, 0.0f, 4095.0f);
-    raw_sensor_data[2][i] = constrain(filtered3, 0.0f, 4095.0f);
-    raw_sensor_data[3][i] = constrain(filtered4, 0.0f, 4095.0f);
-    raw_sensor_data[4][i] = constrain(filtered5, 0.0f, 4095.0f);
-    raw_sensor_data[5][i] = constrain(filtered6, 0.0f, 4095.0f);
+
+    // Store bipolar signals directly (NO encoding needed - buffer is float[])
+    // Negative values from HPF are preserved for correct ZC/SSC feature calculation
+    raw_sensor_data[0][i] = filtered1;
+    raw_sensor_data[1][i] = filtered2;
+    raw_sensor_data[2][i] = filtered3;
+    raw_sensor_data[3][i] = filtered4;
+    raw_sensor_data[4][i] = filtered5;
+    raw_sensor_data[5][i] = filtered6;
 
     // Update servos every 10 samples (~10ms interval) for smooth motion
     #ifdef REAL_TIME_INFERENCE_MODE

@@ -24,7 +24,7 @@ import pyqtgraph as pg
 # ==========================================
 BAUD = 921600
 WINDOW_SIZE = 1000  # Grafikte gösterilecek veri genişliği
-UI_REFRESH_RATE = 70 # ms (Ekranı 50ms'de bir güncelle = 20 FPS). Lag'ı engelleyen ayar budur.
+UI_REFRESH_RATE = 50 # ms (Ekranı 50ms'de bir güncelle = 20 FPS). Lag'ı engelleyen ayar budur.
 
 # Dosya Yolları (Otomatik Algılama)
 # Bu dosyanın bulunduğu klasörden yukarı çıkarak data ve images klasörlerini bulur
@@ -163,7 +163,7 @@ class SerialWorker(QThread):
             print(f"📊 Dosya boyutu: {os.path.getsize(self.current_filename) / 1024:.2f} KB")
             print(f"{'='*60}\n")
         else:
-            print("\n⚠️  Kayıt yapılmadı (dosya yok)")
+            print("\n  Kayıt yapılmadı (dosya yok)")
 
         self.finished_saving.emit("Kayıt Tamamlandı")
 
@@ -402,13 +402,13 @@ class BionicHandGUI(QMainWindow):
             col = i % 2
 
             p = self.graphics_layout.addPlot(row=row, col=col)
-            # Y ekseni -1000 ile +1000 arasında (sıfır merkezli)
-            p.setYRange(-1000, 1000)
+            # Y ekseni 0-4095 arasında (RAW ADC değerleri)
+            p.setYRange(0, 4095)
             p.setXRange(0, WINDOW_SIZE)
             p.showGrid(x=True, y=True, alpha=0.3)
 
-            # Sıfır çizgisi ekle (referans için)
-            p.addLine(y=0, pen=pg.mkPen('#888', width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
+            # Orta nokta referans çizgisi ekle (2047.5 = ADC ortası)
+            p.addLine(y=2047.5, pen=pg.mkPen('#888', width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
 
             # Başlık ve Eksenleri Gizle/Küçült
             p.setTitle(f"EMG CH {i+1}", color=colors[i], size="9pt")
@@ -589,14 +589,9 @@ class BionicHandGUI(QMainWindow):
             for i in range(6):
                 # Veri varsa curve'ü güncelle
                 if len(self.data_buffers[i]) > 0:
-                    # DC offset removal: Ortalamayı çıkar (veri sıfır etrafında görünsün)
+                    # RAW ADC verilerini direkt göster (CSV'deki gibi 0-4095 aralığında)
                     data = list(self.data_buffers[i])
-                    if len(data) > 0:
-                        mean = sum(data) / len(data)
-                        centered_data = [val - mean for val in data]
-                        self.curves[i].setData(centered_data)
-                    else:
-                        self.curves[i].setData(data)
+                    self.curves[i].setData(data)
 
     def closeEvent(self, event):
         self.stop_protocol()

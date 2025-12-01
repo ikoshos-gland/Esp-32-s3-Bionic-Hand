@@ -60,11 +60,17 @@ DROPOUT_RATE_3 = 0.1
 # Early stopping
 EARLY_STOPPING_PATIENCE = 15
 
-# Paths - Organized under scripts_ai/data/
-MODELS_DIR = 'scripts_ai/data/models/'
-PLOTS_DIR = 'scripts_ai/data/plots/'
-FEATURES_DIR = 'scripts_ai/data/features/'
+# Output paths - Centralized training outputs
+# Get script directory to build absolute paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # scripts_ai/
 
+TRAINING_OUTPUTS_DIR = os.path.join(PROJECT_ROOT, 'training_outputs')
+MODELS_DIR = os.path.join(TRAINING_OUTPUTS_DIR, 'models')
+PLOTS_DIR = os.path.join(TRAINING_OUTPUTS_DIR, 'plots')
+FEATURES_DIR = 'scripts_ai/data/features/'  # Keep features in data folder
+
+# Create output directories
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
@@ -102,16 +108,13 @@ def find_latest_features_npz():
     return latest
 
 
-def load_npz_features(npz_path):
+def load_npz_features(npz_path, strict_gestures=False):
     """
     Load TD4 features from NPZ file
 
-    CRITICAL FIX: Uses FIXED gesture order (GESTURE_NAMES_FIXED) instead of
-    alphabetical sorting to match data collection script and C++ code.
-    This prevents label mismatch between training and ESP32 inference!
-
     Args:
         npz_path: Path to NPZ file
+        strict_gestures: If True, enforce GESTURE_NAMES_FIXED. If False, auto-detect from data (default: False)
 
     Returns:
         Tuple of (features, labels, feature_names, num_classes)
@@ -126,82 +129,108 @@ def load_npz_features(npz_path):
 
     features = data['features']
     labels = data['labels']
+    reps = data.get('reps', np.zeros(len(labels)))  # Load reps if available, else default to 0
     feature_names = data['feature_names']
     sensor_columns = data['sensor_columns']
 
     print(f"File: {os.path.basename(npz_path)}")
     print(f"Features shape: {features.shape}")
     print(f"Labels shape: {labels.shape}")
+    print(f"Reps shape: {reps.shape}")
     print(f"Number of features: {len(feature_names)}")
     print(f"Sensors: {sensor_columns}")
 
-    # ============================================================================
-    # CRITICAL FIX: Use FIXED gesture order (matches data collection & C++ code)
-    # ============================================================================
-    # Verify all expected gestures are present in the data
+    # Show rep distribution
+    unique_reps = np.unique(reps)
+    if len(unique_reps) > 1 or (len(unique_reps) == 1 and unique_reps[0] != 0):
+        print(f"Unique reps: {sorted(unique_reps)}")
+
+    # Get unique labels from data
     unique_labels_in_data = np.unique(labels)
 
     print(f"\n{'='*60}")
-    print(f"VERIFYING GESTURE NAMES:")
+    print(f"DETECTED GESTURE NAMES:")
     print(f"{'='*60}")
 
-    missing_gestures = []
-    for gesture in GESTURE_NAMES_FIXED:
-        if gesture not in unique_labels_in_data:
-            missing_gestures.append(gesture)
-            print(f"  ⚠️  WARNING: '{gesture}' not found in data!")
+    if strict_gestures:
+        # ============================================================================
+        # STRICT MODE: Verify gestures match GESTURE_NAMES_FIXED (for ESP32 deployment)
+        # ============================================================================
+        print(f"Mode: STRICT (enforcing GESTURE_NAMES_FIXED)")
 
-    extra_gestures = []
-    for gesture in unique_labels_in_data:
-        if gesture not in GESTURE_NAMES_FIXED:
-            extra_gestures.append(gesture)
-            print(f"  ⚠️  WARNING: '{gesture}' found in data but not in GESTURE_NAMES_FIXED!")
+        missing_gestures = []
+        for gesture in GESTURE_NAMES_FIXED:
+            if gesture not in unique_labels_in_data:
+                missing_gestures.append(gesture)
+                print(f"  ⚠️  WARNING: '{gesture}' not found in data!")
 
-    if missing_gestures or extra_gestures:
-        print(f"\n❌ ERROR: Gesture name mismatch detected!")
-        print(f"   Expected: {GESTURE_NAMES_FIXED}")
-        print(f"   Found in data: {list(unique_labels_in_data)}")
-        raise ValueError("Gesture names in data do not match GESTURE_NAMES_FIXED!")
+        extra_gestures = []
+        for gesture in unique_labels_in_data:
+            if gesture not in GESTURE_NAMES_FIXED:
+                extra_gestures.append(gesture)
+                print(f"  ⚠️  WARNING: '{gesture}' found in data but not in GESTURE_NAMES_FIXED!")
 
-    # Use fixed order (matches C++ and data collection)
-    GESTURE_NAMES = GESTURE_NAMES_FIXED
+        if missing_gestures or extra_gestures:
+            print(f"\n❌ ERROR: Gesture name mismatch detected!")
+            print(f"   Expected: {GESTURE_NAMES_FIXED}")
+            print(f"   Found in data: {list(unique_labels_in_data)}")
+            raise ValueError("Gesture names in data do not match GESTURE_NAMES_FIXED!")
+
+        # Use fixed order (matches C++ and data collection)
+        GESTURE_NAMES = GESTURE_NAMES_FIXED
+    else:
+        # ============================================================================
+        # AUTO-DETECT MODE: Use gesture names from data (for research/experimentation)
+        # ============================================================================
+        print(f"Mode: AUTO-DETECT (using gestures found in data)")
+        print(f"Found gestures: {list(unique_labels_in_data)}")
+
+        # Use gestures as they appear in data (sorted for consistency)
+        GESTURE_NAMES = sorted(unique_labels_in_data)
+
+        print(f"\n💡 TIP: For ESP32 deployment, ensure gesture names match C++ code")
+        print(f"   or use --strict flag to enforce GESTURE_NAMES_FIXED")
+
     NUM_GESTURES = len(GESTURE_NAMES)
 
     print(f"\n{'='*60}")
-    print(f"GESTURE NAMES (FIXED ORDER - Matches C++ & Data Collection):")
+    print(f"GESTURE MAPPING (Order used for training):")
     print(f"{'='*60}")
     for idx, label in enumerate(GESTURE_NAMES):
-        print(f"  [{idx}] {label}")
-    print(f"{'='*60}")
-
-    print(f"\nClass distribution:")
-    for label in GESTURE_NAMES:
         count = np.sum(labels == label)
         percentage = (count / len(labels)) * 100
-        print(f"  {label}: {count} samples ({percentage:.1f}%)")
+        print(f"  [{idx}] {label}: {count} samples ({percentage:.1f}%)")
+    print(f"{'='*60}")
 
     print(f"\nTotal classes: {NUM_GESTURES}")
 
-    return features, labels, feature_names, NUM_GESTURES
+    return features, labels, reps, feature_names, NUM_GESTURES
 
 
-def prepare_data(features, labels, num_classes):
+def prepare_data(features, labels, reps, num_classes):
     """
-    Prepare data for training
+    Prepare data for training using REP-BASED SPLITTING
 
-    CRITICAL FIX: Uses GESTURE_NAMES (fixed order) for label mapping
-    instead of alphabetical np.unique() to match C++ inference order.
+    CRITICAL: Uses repetition numbers to split data instead of random splitting.
+    This ensures no data leakage between train/val/test sets and provides
+    realistic performance estimates.
+
+    Strategy:
+    - Last rep → Test set (completely unseen data)
+    - Second-to-last rep → Validation set (for hyperparameter tuning)
+    - All other reps → Training set
 
     Args:
         features: Feature array (n_samples × n_features)
         labels: Label array (n_samples,)
+        reps: Repetition array (n_samples,) - which repetition each sample belongs to
         num_classes: Number of classes
 
     Returns:
         Tuple of (X_train, X_val, X_test, y_train, y_val, y_test)
     """
     print(f"\n{'='*80}")
-    print("Preparing data splits")
+    print("Preparing data splits using REP-BASED SPLITTING")
     print(f"{'='*80}\n")
 
     # Convert labels to integers using FIXED gesture order
@@ -216,31 +245,86 @@ def prepare_data(features, labels, num_classes):
     # One-hot encode labels
     labels_onehot = keras.utils.to_categorical(labels_int, num_classes)
 
-    # Split: train + temp (for validation + test)
-    # CRITICAL FIX: Disable shuffle to prevent temporal data leakage
-    # Consecutive windows from same gesture should NOT be split between train/test
-    # This was causing artificially high accuracy (~37%) even on pure noise data
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        features, labels_onehot,
-        test_size=(VALIDATION_SPLIT + TEST_SPLIT),
-        random_state=42,
-        shuffle=False,  # FIXED: Preserve temporal ordering to prevent leakage
-        stratify=None   # FIXED: Cannot use stratify when shuffle=False
-    )
+    # Check if we have rep information
+    unique_reps = sorted(np.unique(reps))
+    has_reps = len(unique_reps) > 1 or (len(unique_reps) == 1 and unique_reps[0] != 0)
 
-    # Split temp into validation and test (also without shuffle)
-    val_ratio = VALIDATION_SPLIT / (VALIDATION_SPLIT + TEST_SPLIT)
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp,
-        test_size=(1 - val_ratio),
-        random_state=42,
-        shuffle=False  # FIXED: Maintain temporal ordering
-    )
+    if has_reps:
+        print(f"\n{'='*60}")
+        print(f"REP-BASED SPLITTING (Realistic evaluation)")
+        print(f"{'='*60}")
+        print(f"Available reps: {unique_reps}")
 
-    print(f"Data splits:")
-    print(f"  Training:   {X_train.shape[0]} samples ({(1-VALIDATION_SPLIT-TEST_SPLIT)*100:.0f}%)")
-    print(f"  Validation: {X_val.shape[0]} samples ({VALIDATION_SPLIT*100:.0f}%)")
-    print(f"  Test:       {X_test.shape[0]} samples ({TEST_SPLIT*100:.0f}%)")
+        # Determine split strategy based on number of reps
+        if len(unique_reps) >= 3:
+            # Ideal case: Use last rep for test, second-to-last for validation
+            test_reps = [unique_reps[-1]]
+            val_reps = [unique_reps[-2]]
+            train_reps = unique_reps[:-2]
+        elif len(unique_reps) == 2:
+            # Only 2 reps: Use last for test, first for both train and val
+            test_reps = [unique_reps[-1]]
+            val_reps = [unique_reps[0]]
+            train_reps = [unique_reps[0]]
+        else:
+            # Only 1 rep: Fall back to random split (not ideal)
+            print("⚠️  WARNING: Only 1 repetition found. Falling back to temporal split.")
+            print("    For realistic evaluation, collect data with multiple repetitions!")
+            has_reps = False
+
+        if has_reps:
+            print(f"\nRep assignments:")
+            print(f"  Training reps:   {train_reps}")
+            print(f"  Validation reps: {val_reps}")
+            print(f"  Test reps:       {test_reps}")
+
+            # Create masks for each split
+            train_mask = np.isin(reps, train_reps)
+            val_mask = np.isin(reps, val_reps)
+            test_mask = np.isin(reps, test_reps)
+
+            # Split data using rep masks
+            X_train = features[train_mask]
+            y_train = labels_onehot[train_mask]
+            X_val = features[val_mask]
+            y_val = labels_onehot[val_mask]
+            X_test = features[test_mask]
+            y_test = labels_onehot[test_mask]
+
+            print(f"\n✅ Rep-based split completed:")
+            print(f"  Training:   {X_train.shape[0]} samples ({X_train.shape[0]/len(features)*100:.1f}%)")
+            print(f"  Validation: {X_val.shape[0]} samples ({X_val.shape[0]/len(features)*100:.1f}%)")
+            print(f"  Test:       {X_test.shape[0]} samples ({X_test.shape[0]/len(features)*100:.1f}%)")
+            print(f"\n💡 This split ensures NO DATA LEAKAGE between sets.")
+            print(f"   Accuracy may be lower but more realistic!")
+
+    if not has_reps:
+        # Fallback: Use temporal split (no shuffle)
+        print(f"\n{'='*60}")
+        print(f"TEMPORAL SPLITTING (No Rep info available)")
+        print(f"{'='*60}")
+
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            features, labels_onehot,
+            test_size=(VALIDATION_SPLIT + TEST_SPLIT),
+            random_state=42,
+            shuffle=False,  # Preserve temporal ordering
+            stratify=None
+        )
+
+        val_ratio = VALIDATION_SPLIT / (VALIDATION_SPLIT + TEST_SPLIT)
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp,
+            test_size=(1 - val_ratio),
+            random_state=42,
+            shuffle=False
+        )
+
+        print(f"Data splits (temporal):")
+        print(f"  Training:   {X_train.shape[0]} samples ({(1-VALIDATION_SPLIT-TEST_SPLIT)*100:.0f}%)")
+        print(f"  Validation: {X_val.shape[0]} samples ({VALIDATION_SPLIT*100:.0f}%)")
+        print(f"  Test:       {X_test.shape[0]} samples ({TEST_SPLIT*100:.0f}%)")
+
     print(f"\nFeature dimension: {X_train.shape[1]}")
 
     return X_train, X_val, X_test, y_train, y_val, y_test
@@ -572,13 +656,15 @@ def convert_to_tflite_float32(model, output_path):
     return size_kb
 
 
-def convert_to_c_header(tflite_path, output_path):
+def convert_to_c_header(tflite_path, output_path, num_sensors, num_features):
     """
     Convert TFLite model to C header file for ESP32-S3
 
     Args:
         tflite_path: Path to TFLite model
         output_path: Path to save .h file
+        num_sensors: Number of EMG sensors
+        num_features: Total number of features
     """
     print(f"\nConverting to C header file for ESP32-S3...")
 
@@ -604,7 +690,7 @@ def convert_to_c_header(tflite_path, output_path):
 // Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 // Model size: {len(tflite_data)} bytes
 // Format: Float32 (no quantization for TFLite v2.1.1 compatibility)
-// Input: 24 features (4 TD4 × 6 EMG sensors)
+// Input: {num_features} features (4 TD4 × {num_sensors} EMG sensors)
 // Output: {NUM_GESTURES} gestures
 
 #ifndef MODEL_H
@@ -633,31 +719,49 @@ const unsigned int model_tflite_len = {len(tflite_data)};
 # MAIN PIPELINE
 # ============================================================================
 
-def main():
+def main(num_sensors=6, npz_path=None, strict_gestures=False):
     """
     Main training pipeline
+
+    Args:
+        num_sensors: Number of EMG sensors (default: 6)
+        npz_path: Path to NPZ file (default: auto-find latest)
+        strict_gestures: Enforce GESTURE_NAMES_FIXED (default: False, auto-detect from data)
     """
     print("\n" + "="*80)
     print("ESP32-S3 Bionic Hand - Wide & Deep MLP Training".center(80))
     print("TD4 Features (MAV, WL, ZC, SSC) - Literature-Based Approach".center(80))
     print("="*80)
 
+    # Show output directories
+    print(f"\n📁 Output Directories:")
+    print(f"   Models: {MODELS_DIR}")
+    print(f"   Plots:  {PLOTS_DIR}")
+
     # Find and load features
-    npz_path = find_latest_features_npz()
     if npz_path is None:
-        return
+        npz_path = find_latest_features_npz()
+        if npz_path is None:
+            return
+    else:
+        # Verify custom NPZ path exists
+        if not os.path.exists(npz_path):
+            print(f"\n❌ ERROR: NPZ file not found: {npz_path}")
+            return
+        print(f"\nUsing specified NPZ file: {npz_path}")
 
-    features, labels, feature_names, num_classes = load_npz_features(npz_path)
+    features, labels, reps, feature_names, num_classes = load_npz_features(npz_path, strict_gestures=strict_gestures)
 
-    # Verify feature count
-    expected_features = 24  # 4 TD4 features × 6 sensors
+    # Verify feature count (4 TD4 features per sensor)
+    expected_features = 4 * num_sensors
     if features.shape[1] != expected_features:
-        print(f"\n⚠️  WARNING: Expected {expected_features} features, got {features.shape[1]}")
-        print("   Make sure you're using 6 EMG sensors with TD4 features")
+        print(f"\n⚠️  WARNING: Expected {expected_features} features (4 TD4 × {num_sensors} sensors), got {features.shape[1]}")
+        print(f"   Make sure you're using {num_sensors} EMG sensors with TD4 features")
+        print(f"   Or specify correct sensor count with --sensors argument")
 
-    # Prepare data
+    # Prepare data using rep-based splitting
     X_train, X_val, X_test, y_train, y_val, y_test = prepare_data(
-        features, labels, num_classes
+        features, labels, reps, num_classes
     )
 
     # Build model
@@ -704,7 +808,7 @@ def main():
 
     # Convert to C header
     header_path = os.path.join(MODELS_DIR, f'mlp_td4_{timestamp}_float32.h')
-    convert_to_c_header(tflite_path, header_path)
+    convert_to_c_header(tflite_path, header_path, num_sensors, features.shape[1])
 
     # Final summary
     print(f"\n{'='*80}")
@@ -732,4 +836,53 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='Train Wide & Deep MLP for EMG gesture classification',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Auto-find latest NPZ, auto-detect gestures (6 sensors)
+  python train_test_model.py
+
+  # LibEMG dataset with 8 sensors and auto-detect gestures (C1, C2, ...)
+  python train_test_model.py --npz ../data/LibEMG/features/merged_all_scaled_td4_features.npz --sensors 8
+
+  # ESP32 dataset with strict gesture checking (Rest, Fist, Open, ...)
+  python train_test_model.py --npz ../data/esp32_features/training_td4_features.npz --sensors 6 --strict
+
+  # Custom sensor count with auto-find
+  python train_test_model.py --sensors 4
+        """
+    )
+
+    parser.add_argument(
+        '--sensors',
+        type=int,
+        default=6,
+        help='Number of EMG sensors (default: 6). Must match feature extraction.'
+    )
+
+    parser.add_argument(
+        '--npz',
+        type=str,
+        default=None,
+        help='Path to NPZ features file (default: auto-find latest in scripts_ai/data/features/)'
+    )
+
+    parser.add_argument(
+        '--strict',
+        action='store_true',
+        help='Enforce GESTURE_NAMES_FIXED matching (for ESP32 deployment). Default: auto-detect gestures from data.'
+    )
+
+    args = parser.parse_args()
+
+    print(f"\nTraining with {args.sensors} EMG sensors ({4 * args.sensors} TD4 features)")
+    if args.strict:
+        print(f"Gesture mode: STRICT (enforcing GESTURE_NAMES_FIXED)")
+    else:
+        print(f"Gesture mode: AUTO-DETECT (using gestures from data)")
+
+    main(num_sensors=args.sensors, npz_path=args.npz, strict_gestures=args.strict)

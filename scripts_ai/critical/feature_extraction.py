@@ -25,6 +25,10 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple
 import os
+import sys
+
+# Add parent directory to path for imports from sibling folders
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
 class TD4FeatureExtractor:
@@ -241,7 +245,8 @@ class TD4FeatureExtractor:
         Returns:
             Tuple of (features_array, labels_array, feature_names)
         """
-        assert len(sensor_columns) == 6, f"Expected 6 EMG sensors, got {len(sensor_columns)}"
+        # Validate sensor columns
+        assert len(sensor_columns) > 0, "At least one EMG sensor column is required"
 
         print(f"\nProcessing DataFrame: {len(df)} raw samples...")
 
@@ -253,7 +258,7 @@ class TD4FeatureExtractor:
             print("APPLYING DSP FILTERS (Matching C++ ESP32 preprocessing)")
             print(f"{'='*60}")
 
-            from dsp_filters import EMGFilterBank
+            from filters.dsp_filters import EMGFilterBank
 
             filter_bank = EMGFilterBank(
                 sampling_rate=self.sampling_rate,
@@ -302,6 +307,7 @@ class TD4FeatureExtractor:
 
         features_list = []
         labels_list = []
+        reps_list = []  # NEW: Track repetition number for each window
 
         # Generate feature names
         feature_names = []
@@ -315,6 +321,9 @@ class TD4FeatureExtractor:
 
         # Reset index after filtering (CRITICAL!)
         df = df.reset_index(drop=True)
+
+        # Check if Rep column exists
+        has_rep_column = 'Rep' in df.columns
 
         # Sliding window extraction
         n_windows = 0
@@ -331,6 +340,15 @@ class TD4FeatureExtractor:
             except IndexError:
                 continue  # Skip empty windows if any
 
+            # Get rep number (most common rep in window)
+            if has_rep_column:
+                try:
+                    window_rep = int(window_df['Rep'].mode()[0])
+                except (IndexError, ValueError):
+                    window_rep = 0  # Default if Rep is missing
+            else:
+                window_rep = 0  # No Rep column available
+
             # Extract features
             window_features = self.extract_window_features(window_data, sensor_columns)
 
@@ -339,10 +357,12 @@ class TD4FeatureExtractor:
 
             features_list.append(feature_vector)
             labels_list.append(window_label)
+            reps_list.append(window_rep)
             n_windows += 1
 
         features_array = np.array(features_list)
         labels_array = np.array(labels_list)
+        reps_array = np.array(reps_list)
 
         print(f"\nExtracted {n_windows} windows")
         print(f"Feature shape: {features_array.shape}")
@@ -400,24 +420,31 @@ class TD4FeatureExtractor:
                     
                     features_array = features_array[final_indices]
                     labels_array = labels_array[final_indices]
-                    
+                    reps_array = reps_array[final_indices]  # NEW: Also subsample reps
+
                     print(f"  ✅ Downsampled '{rest_label}' from {current_rest_count} to {target_count}")
                     print(f"  Total samples after balancing: {len(labels_array)}")
                 else:
                     print(f"  ✅ '{rest_label}' already balanced (no downsampling needed)")
-        
+
         # Show final class distribution
         print(f"\nFinal Class Distribution:")
         unique_labels_final, label_counts_final = np.unique(labels_array, return_counts=True)
         for label, count in zip(unique_labels_final, label_counts_final):
             percentage = (count / len(labels_array)) * 100
             print(f"  {label}: {count} samples ({percentage:.1f}%)")
-        
+
         print(f"\nFinal feature shape: {features_array.shape}")
         print(f"Total features per window: {len(feature_names)}")
+
+        # Show Rep distribution if available
+        if has_rep_column:
+            unique_reps = np.unique(reps_array)
+            print(f"\nRep distribution: {sorted(unique_reps)}")
+
         print(f"{'='*60}\n")
 
-        return features_array, labels_array, feature_names
+        return features_array, labels_array, reps_array, feature_names
 
     def normalize_features(self, features: np.ndarray) -> Tuple[np.ndarray, Dict]:
         """
@@ -454,7 +481,7 @@ class TD4FeatureExtractor:
 def extract_features_from_csv(csv_path: str,
                               output_dir: str = 'scripts_ai/data/features',
                               sensor_columns: List[str] = None,
-                              apply_filters: bool = True,
+                              apply_filters: bool = False,
                               powerline_freq: int = 50) -> str:
     """
     Extract TD4 features from a CSV file and save to NPZ format
@@ -463,7 +490,7 @@ def extract_features_from_csv(csv_path: str,
         csv_path: Path to input CSV file
         output_dir: Directory to save extracted features
         sensor_columns: List of 6 EMG sensor column names
-        apply_filters: Apply DSP filters (HPF+LPF+Notch) to match C++ (default: True)
+        apply_filters: Apply DSP filters (CHANGED: Default False - C++ applies filters!)
         powerline_freq: Powerline frequency 50 or 60 Hz (default: 50)
 
     Returns:
@@ -478,6 +505,26 @@ def extract_features_from_csv(csv_path: str,
     df = pd.read_csv(csv_path)
     print(f"Loaded {len(df)} samples")
     print(f"Columns: {df.columns.tolist()}")
+
+    # ============================================================================
+    # DECODE BIPOLAR-ENCODED SENSOR DATA
+    # ============================================================================
+    # C++ (data_acquisition.cpp) applies DSP filters and encodes bipolar signals:
+    #   Encoding: float [-2047.5, +2047.5] → uint16_t [0, 4095]
+    # We must decode before feature extraction:
+    #   Decoding: uint16_t [0, 4095] → float [-2047.5, +2047.5]
+    print(f"\n{'='*70}")
+    print("DECODING BIPOLAR-ENCODED SENSOR DATA")
+    print(f"{'='*70}")
+    print("C++ applies DSP filters and encodes: float → uint16_t [0, 4095]")
+    print("Python decodes: uint16_t [0, 4095] → bipolar float [-2047.5, +2047.5]")
+
+    for col in sensor_columns:
+        if col in df.columns:
+            df[col] = df[col] - 2047.5  # Decode: uint16_t → bipolar float
+
+    print(f"✓ Sensor data decoded (now bipolar, centered around 0)")
+    print(f"{'='*70}\n")
 
     # Verify sensor columns exist
     for col in sensor_columns:
@@ -494,10 +541,14 @@ def extract_features_from_csv(csv_path: str,
         adc_max=4095.0
     )
 
-    # Extract features (now uses raw signal processing with DC offset removal + DSP filters)
-    features, labels, feature_names = extractor.extract_features_from_dataframe(
+    # Extract features (C++ already applied DSP filters, so skip Python filtering)
+    # CRITICAL: Default apply_filters=False to prevent DOUBLE FILTERING!
+    # C++ (data_acquisition.cpp) already applies: HPF → LPF → Notch → Encoding
+    # For old data (pre-encoding), you can override with apply_filters=True
+    features, labels, reps, feature_names = extractor.extract_features_from_dataframe(
         df, sensor_columns, label_column='Movement',
-        apply_filters=apply_filters, powerline_freq=powerline_freq
+        apply_filters=apply_filters,  # Default False (C++ already applied filters)
+        powerline_freq=powerline_freq
     )
 
     # Features are already globally normalized during extraction
@@ -517,6 +568,7 @@ def extract_features_from_csv(csv_path: str,
         output_path,
         features=features_normalized,
         labels=labels,
+        reps=reps,  # NEW: Save repetition numbers for rep-based splitting
         feature_names=feature_names,
         norm_params_note=norm_params['note'],
         norm_params_adc_max=norm_params['adc_max'],
@@ -526,6 +578,8 @@ def extract_features_from_csv(csv_path: str,
     print(f"\nFeatures saved to: {output_path}")
     print(f"Features shape: {features_normalized.shape}")
     print(f"Unique labels: {np.unique(labels)}")
+    if len(reps) > 0 and np.max(reps) > 0:
+        print(f"Unique reps: {sorted(np.unique(reps))}")
 
     return output_path
 
@@ -534,21 +588,57 @@ if __name__ == "__main__":
     """
     Example usage
     """
-    import sys
+    import argparse
 
-    if len(sys.argv) < 2:
-        print("Usage: python feature_extraction.py <path_to_csv>")
-        print("\nExample:")
-        print("  python feature_extraction.py data/training_data_20251123.csv")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description='Extract TD4 features from EMG CSV data',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # 6 sensors (default output directory)
+  python feature_extraction.py data/training_data.csv
 
-    csv_path = sys.argv[1]
+  # 8 sensors with custom output directory
+  python feature_extraction.py data/libemg_data.csv --sensors 8 --output data/libemg_features
+
+  # Custom sensor count and output
+  python feature_extraction.py data/custom.csv --sensors 4 --output data/custom_features
+        """
+    )
+
+    parser.add_argument(
+        'csv_path',
+        type=str,
+        help='Path to input CSV file with EMG data'
+    )
+
+    parser.add_argument(
+        '--sensors',
+        type=int,
+        default=6,
+        help='Number of EMG sensors (default: 6). Expects columns EMG1, EMG2, ..., EMG<N>'
+    )
+
+    parser.add_argument(
+        '--output',
+        type=str,
+        default='scripts_ai/data/features',
+        help='Output directory for NPZ file (default: scripts_ai/data/features)'
+    )
+
+    args = parser.parse_args()
+
+    # Generate sensor column names dynamically
+    sensor_columns = [f'EMG{i+1}' for i in range(args.sensors)]
+
+    print(f"Using {args.sensors} sensors: {sensor_columns}")
+    print(f"Output directory: {args.output}")
 
     # Extract features
     output_path = extract_features_from_csv(
-        csv_path,
-        output_dir='scripts_ai/data/features',
-        sensor_columns=['EMG1', 'EMG2', 'EMG3', 'EMG4', 'EMG5', 'EMG6']
+        args.csv_path,
+        output_dir=args.output,
+        sensor_columns=sensor_columns
     )
 
     print("\n" + "="*60)

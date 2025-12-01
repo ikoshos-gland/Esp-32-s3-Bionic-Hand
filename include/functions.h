@@ -1,6 +1,7 @@
 #ifndef FUNCTIONS_H_
 #define FUNCTIONS_H_ //header guard to prevent adding it multiple times
 
+#include <Arduino.h>  // For constrain() macro (needed by encode_bipolar)
 #include <stdint.h>
 //C++ mathematical functions
 #include <cmath>
@@ -29,6 +30,48 @@
 #define pin_MW4 7   // GPIO 7  (ADC1_CH6)
 #define pin_MW5 15  // GPIO 15 (ADC2_CH4)
 #define pin_MW6 16  // GPIO 16 (ADC2_CH5)
+
+// ============================================================================
+// BIPOLAR SIGNAL ENCODING/DECODING
+// ============================================================================
+// HPF (High-Pass Filter) creates bipolar signals (negative values after DC removal),
+// but uint16_t serial protocol requires [0, 4095] range.
+// Solution: Use offset encoding to preserve negative values during transmission.
+
+#define BIPOLAR_OFFSET 2047.5f  // ADC midpoint (4095 / 2) for symmetric bipolar range
+
+/**
+ * Encode bipolar float to uint16_t for serial transmission
+ *
+ * Maps: float [-2047.5, +2047.5] → uint16_t [0, 4095]
+ *
+ * Example transformations:
+ *   -2000.0 →   48  (negative preserved as low values)
+ *       0.0 → 2048  (DC center maps to ADC midpoint)
+ *   +2000.0 → 4048  (positive maps to high values)
+ *
+ * @param filtered Bipolar filtered signal (can be negative)
+ * @return Encoded uint16_t in range [0, 4095]
+ */
+inline uint16_t encode_bipolar(float filtered) {
+    return (uint16_t)constrain(filtered + BIPOLAR_OFFSET, 0.0f, 4095.0f);
+}
+
+/**
+ * Decode uint16_t to bipolar float (for documentation - Python uses own decoding)
+ *
+ * Maps: uint16_t [0, 4095] → float [-2047.5, +2047.5]
+ *
+ * Note: This function is for C++ reference only.
+ * Python training pipeline implements its own decoding:
+ *   df[col] = df[col] - 2047.5
+ *
+ * @param encoded Encoded uint16_t from serial transmission
+ * @return Decoded bipolar float
+ */
+inline float decode_bipolar(uint16_t encoded) {
+    return (float)encoded - BIPOLAR_OFFSET;
+}
 
 // Raw signal buffers (6 sensors × RAW_WINDOW_SIZE samples)
 // CHANGED: Storing raw ADC values instead of RMS windows
