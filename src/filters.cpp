@@ -10,7 +10,7 @@
  */
 
 #include "filters.h"
-#include "filter_coefficients_50hz.h"  // Auto-generated coefficients for 1000/2000 Hz
+#include "filter_coefficients_50hz.h"  // Auto-generated, 1000 Hz unless FILTER_SAMPLING_2000HZ
 
 // ============================================================================
 // GLOBAL FILTER STATES (6 sensors)
@@ -137,7 +137,7 @@ void filters_init() {
   }
 
   Serial.println("Filter Configuration:");
-  Serial.println("  Sampling Rate: 2000 Hz (Unified for all modes)");
+  Serial.printf("  Sampling Rate: %d Hz (coefficients designed for this rate)\n", FILTER_SAMPLING_RATE_HZ);
 
   Serial.print("  High-Pass Filter (20 Hz): ");
   Serial.println(ENABLE_HPF ? "ENABLED" : "DISABLED");

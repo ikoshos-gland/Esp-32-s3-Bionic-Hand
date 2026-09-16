@@ -1,299 +1,201 @@
 """
-DSP Filter Validation Script
-=============================
+Python <-> C++ filter equivalence test
+======================================
 
-Validates that Python filters match C++ implementation on ESP32-S3.
+What is actually tested (no hardware needed):
 
-Tests:
-1. WL normalization bug fix validation
-2. Filter frequency response
-3. Time-domain filter behavior
-4. C++/Python feature parity (requires ESP32 connection)
+1. Coefficients: the numbers in include/filter_coefficients_50hz.h equal the
+   scipy design (butter 4th-order 20 Hz HPF, 450 Hz LPF, iirnotch 50 Hz Q=12.5)
+   at 1000 Hz, to 1e-6.
+2. Sample-level equivalence: a float32 transliteration of the C++ biquad
+   cascade (Direct Form II Transposed) run with the HEADER coefficients gives
+   the same output as scipy.signal.sosfilt with the DESIGNED coefficients, on
+   a realistic synthetic EMG signal (tolerance 0.05 ADC counts, i.e. below
+   ADC resolution).
+3. Stability: every biquad has poles strictly inside the unit circle.
+4. Frequency response sanity: DC and 50 Hz rejected, 100 Hz passed.
+5. TD4 equivalence: the Python TD4FeatureExtractor and a transliteration of
+   the C++ extract_features_from_raw() loop agree on random windows.
 
-Author: ESP32 Bionic Hand Project
-Date: 2025
+Exit code 0 on success, 1 on any failure (usable in CI).
 """
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # Windows console safety
+
+
+import os
+import re
+import sys
 
 import numpy as np
-import matplotlib.pyplot as plt
-from dsp_filters import EMGFilterBank
-from feature_extraction import TD4FeatureExtractor
+from scipy import signal
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, '..'))
+sys.path.insert(0, os.path.join(HERE, '..', 'critical'))
+
+from filters.dsp_filters import EMGFilterBank, biquad_cascade_reference, sos_to_stages  # noqa: E402
+from feature_extraction import TD4FeatureExtractor  # noqa: E402
+
+HEADER = os.path.join(HERE, '..', '..', 'include', 'filter_coefficients_50hz.h')
+FS = 1000
+FAILURES = []
 
 
-def test_wl_normalization():
-    """
-    Test that WL normalization matches between C++ and Python.
-
-    CRITICAL BUG FIX: C++ was dividing by 4095, Python by (4095×250).
-    Now both should produce identical results.
-    """
-    print("\n" + "="*70)
-    print("TEST 1: WL Normalization Bug Fix")
-    print("="*70)
-
-    # Create test signal: alternating [0, 100, 0, 100, ...]
-    window_size = 250
-    test_signal = np.tile([0, 100], window_size // 2)
-
-    # Calculate WL (sum of absolute differences)
-    wl_raw = np.sum(np.abs(np.diff(test_signal)))
-    print(f"\nRaw WL: {wl_raw} (expected: {100 * 249} = 24,900)")
-
-    # Old (WRONG) normalization: wl / 4095
-    wl_old = wl_raw / 4095.0
-    print(f"Old (WRONG) normalization: {wl_old:.6f}")
-
-    # New (CORRECT) normalization: wl / (4095 × 250)
-    wl_new = wl_raw / (4095.0 * 250)
-    print(f"New (CORRECT) normalization: {wl_new:.6f}")
-
-    print(f"\nDiscrepancy: {wl_old / wl_new:.1f}× difference!")
-    print(f"Expected: 0.0243 (Python ground truth)")
-
-    # Validate
-    expected = 24900 / (4095 * 250)
-    if abs(wl_new - expected) < 0.0001:
-        print("✅ PASS: WL normalization is correct")
-    else:
-        print(f"❌ FAIL: Expected {expected:.6f}, got {wl_new:.6f}")
-
-    print("="*70)
+def check(cond, msg):
+    print(("  PASS  " if cond else "  FAIL  ") + msg)
+    if not cond:
+        FAILURES.append(msg)
 
 
-def test_filter_frequency_response():
-    """
-    Test filter frequency responses.
-
-    Validates:
-    - HPF: DC rejection, 20 Hz cutoff
-    - LPF: High-frequency rejection, 450 Hz cutoff
-    - Notch: 50 Hz rejection
-    """
-    print("\n" + "="*70)
-    print("TEST 2: Filter Frequency Response")
-    print("="*70)
-
-    # Create filter bank
-    filter_bank = EMGFilterBank(sampling_rate=2000, powerline_freq=50)
-
-    # Test DC rejection (HPF)
-    print("\nHigh-Pass Filter (20 Hz):")
-    w, mag = filter_bank.get_frequency_response('hpf')
-    dc_gain = mag[0]  # Magnitude at 0 Hz
-    print(f"  DC gain: {dc_gain:.1f} dB (should be << -40 dB)")
-
-    if dc_gain < -40:
-        print("  ✅ PASS: DC properly rejected")
-    else:
-        print("  ❌ FAIL: DC not sufficiently rejected")
-
-    # Test high-frequency rejection (LPF)
-    print("\nLow-Pass Filter (450 Hz):")
-    w, mag = filter_bank.get_frequency_response('lpf')
-    nyquist_gain = mag[-1]  # Magnitude at Nyquist (1000 Hz)
-    print(f"  Nyquist gain: {nyquist_gain:.1f} dB (should be << -40 dB)")
-
-    if nyquist_gain < -40:
-        print("  ✅ PASS: High frequencies properly rejected")
-    else:
-        print("  ❌ FAIL: High frequencies not sufficiently rejected")
-
-    # Test powerline rejection (Notch)
-    print("\nNotch Filter (50 Hz):")
-    w, mag = filter_bank.get_frequency_response('notch')
-    idx_50hz = np.argmin(np.abs(w - 50))
-    notch_gain = mag[idx_50hz]
-    print(f"  50 Hz gain: {notch_gain:.1f} dB (should be < -30 dB)")
-
-    if notch_gain < -30:
-        print("  ✅ PASS: Powerline properly rejected")
-    else:
-        print("  ❌ FAIL: Powerline not sufficiently rejected")
-
-    print("="*70)
-
-    # Plot frequency response
-    try:
-        filter_bank.plot_frequency_response(save_path='plots/filter_frequency_response.png')
-    except:
-        print("\nNote: Could not save plot (matplotlib may not be available)")
+def parse_header(path=HEADER, block='1000'):
+    """Return dict name -> float for the 1000 Hz (default) block of the header."""
+    text = open(path, encoding='utf-8').read()
+    # default block is between '#ifndef FILTER_SAMPLING_2000HZ' and '#else'
+    m = re.search(r'#ifndef FILTER_SAMPLING_2000HZ(.*?)#else', text, re.S)
+    if not m:
+        raise RuntimeError('header layout not recognised (expected #ifndef FILTER_SAMPLING_2000HZ ... #else)')
+    body = m.group(1)
+    coeffs = {}
+    for name, val in re.findall(r'const float (\w+) = ([-0-9.]+)f;', body):
+        coeffs[name] = float(val)
+    return coeffs
 
 
-def test_filter_time_domain():
-    """
-    Test filters in time domain with synthetic EMG signal.
-    """
-    print("\n" + "="*70)
-    print("TEST 3: Time-Domain Filter Behavior")
-    print("="*70)
-
-    # Create synthetic signal (1 second @ 2000 Hz)
-    t = np.linspace(0, 1, 2000)
-
-    # Components
-    dc_offset = 2048  # ADC midpoint
-    low_freq_drift = 200 * np.sin(2 * np.pi * 5 * t)  # 5 Hz motion
-    emg_signal = 300 * np.sin(2 * np.pi * 100 * t)  # 100 Hz EMG
-    powerline_noise = 150 * np.sin(2 * np.pi * 50 * t)  # 50 Hz powerline
-    high_freq_noise = 50 * np.random.randn(len(t))  # Random noise
-
-    raw_signal = dc_offset + low_freq_drift + emg_signal + powerline_noise + high_freq_noise
-
-    # Apply filters
-    filter_bank = EMGFilterBank(sampling_rate=2000, powerline_freq=50)
-    filtered_signal = filter_bank.filter_signal(raw_signal)
-
-    # Analyze results
-    print(f"\nRaw Signal:")
-    print(f"  Mean: {np.mean(raw_signal):.1f} (should be ~{dc_offset})")
-    print(f"  Std: {np.std(raw_signal):.1f}")
-
-    print(f"\nFiltered Signal:")
-    print(f"  Mean: {np.mean(filtered_signal):.1f} (should be ~0, DC removed)")
-    print(f"  Std: {np.std(filtered_signal):.1f}")
-
-    # Validate DC removal
-    if abs(np.mean(filtered_signal)) < 10:
-        print("  ✅ PASS: DC offset removed")
-    else:
-        print(f"  ❌ FAIL: DC not removed (mean = {np.mean(filtered_signal):.1f})")
-
-    # Calculate SNR improvement
-    noise_raw = raw_signal - dc_offset - emg_signal
-    noise_filtered = filtered_signal - emg_signal
-
-    snr_raw = 10 * np.log10(np.mean(emg_signal**2) / np.mean(noise_raw**2))
-    snr_filtered = 10 * np.log10(np.mean(emg_signal**2) / np.mean(noise_filtered**2))
-    snr_improvement = snr_filtered - snr_raw
-
-    print(f"\nSNR Analysis:")
-    print(f"  Raw SNR: {snr_raw:.1f} dB")
-    print(f"  Filtered SNR: {snr_filtered:.1f} dB")
-    print(f"  Improvement: {snr_improvement:.1f} dB")
-
-    if snr_improvement > 5:
-        print("  ✅ PASS: Significant SNR improvement (>5 dB)")
-    else:
-        print("  ❌ FAIL: Insufficient SNR improvement")
-
-    print("="*70)
-
-    # Plot time-domain comparison
-    try:
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-
-        axes[0].plot(t[:500], raw_signal[:500], 'b-', alpha=0.7, label='Raw Signal')
-        axes[0].set_title('Raw EMG Signal (First 250ms)', fontweight='bold')
-        axes[0].set_xlabel('Time (s)')
-        axes[0].set_ylabel('ADC Value')
-        axes[0].grid(True, alpha=0.3)
-        axes[0].legend()
-
-        axes[1].plot(t[:500], filtered_signal[:500], 'r-', alpha=0.7, label='Filtered Signal')
-        axes[1].set_title('Filtered EMG Signal (After HPF+LPF+Notch)', fontweight='bold')
-        axes[1].set_xlabel('Time (s)')
-        axes[1].set_ylabel('ADC Value')
-        axes[1].grid(True, alpha=0.3)
-        axes[1].legend()
-
-        plt.tight_layout()
-        plt.savefig('plots/filter_time_domain.png', dpi=300, bbox_inches='tight')
-        print("\nTime-domain plot saved to: plots/filter_time_domain.png")
-    except:
-        print("\nNote: Could not save plot (matplotlib may not be available)")
+def header_stages(coeffs):
+    def st(prefix):
+        return (coeffs[f'{prefix}_B0'], coeffs[f'{prefix}_B1'], coeffs[f'{prefix}_B2'],
+                coeffs[f'{prefix}_A1'], coeffs[f'{prefix}_A2'])
+    return [st('HPF_STAGE1'), st('HPF_STAGE2'), st('LPF_STAGE1'), st('LPF_STAGE2'), st('NOTCH')]
 
 
-def test_td4_feature_extraction():
-    """
-    Test TD4 feature extraction on filtered vs unfiltered signals.
-    """
-    print("\n" + "="*70)
-    print("TEST 4: TD4 Feature Extraction (Filtered vs Unfiltered)")
-    print("="*70)
+def synthetic_emg(seconds=2.0, fs=FS, seed=0):
+    rng = np.random.default_rng(seed)
+    t = np.arange(0, seconds, 1 / fs)
+    emg = 250 * rng.standard_normal(len(t)) * (0.5 + 0.5 * np.sin(2 * np.pi * 1.5 * t))
+    return 1850 + 120 * np.sin(2 * np.pi * 3 * t) + 150 * np.sin(2 * np.pi * 50 * t) + emg
 
-    # Create synthetic EMG signal (250ms @ 2000 Hz = 500 samples)
-    window_size = 500
-    t = np.linspace(0, 0.25, window_size)
 
-    # Realistic EMG with noise
-    emg_clean = 300 * np.sin(2 * np.pi * 100 * t)
-    dc_offset = 2048
-    powerline = 150 * np.sin(2 * np.pi * 50 * t)
-    noise = 50 * np.random.randn(window_size)
+def test_coefficients_match_design():
+    print("\nTEST 1: header coefficients == scipy design")
+    coeffs = parse_header()
+    fb = EMGFilterBank(sampling_rate=FS, powerline_freq=50, verbose=False)
+    designed = sos_to_stages(fb.cascade_sos())
+    header = header_stages(coeffs)
+    worst = max(abs(np.array(h) - np.array(d)).max() for h, d in zip(header, designed))
+    check(worst < 1e-6, f"max coefficient difference {worst:.2e} (< 1e-6)")
+    return header, designed
 
-    raw_signal = dc_offset + emg_clean + powerline + noise
 
-    # Apply filters
-    filter_bank = EMGFilterBank(sampling_rate=2000, powerline_freq=50)
-    filtered_signal = filter_bank.filter_signal(raw_signal)
+def test_sample_equivalence(header):
+    print("\nTEST 2: C++ biquad cascade (float32, header coeffs) == scipy sosfilt (causal)")
+    x = synthetic_emg()
+    fb = EMGFilterBank(sampling_rate=FS, powerline_freq=50, verbose=False)
+    y_py = fb.filter_signal(x)
+    y_cpp = biquad_cascade_reference(x, header)
+    err = np.abs(y_py - y_cpp)
+    check(err.max() < 0.05, f"max |python - cpp| = {err.max():.4f} ADC counts over {len(x)} samples (< 0.05)")
+    check(np.abs(y_py[500:].mean()) < 1.0, f"DC removed: mean after settling {y_py[500:].mean():.3f}")
 
-    # Extract TD4 features
-    extractor = TD4FeatureExtractor(
-        window_size_ms=250,
-        sampling_rate=2000,
-        zc_threshold_adc=15.0,
-        ssc_threshold_adc=15.0,
-        adc_max=4095.0
-    )
 
-    # Compute features (6 sensors, but we'll use same signal for demo)
-    sensor_data_raw = np.tile(raw_signal, (6, 1)).T
-    sensor_data_filtered = np.tile(filtered_signal, (6, 1)).T
+def test_stability(header):
+    print("\nTEST 3: every biquad stable (poles inside unit circle)")
+    for name, (_, _, _, a1, a2) in zip(['HPF1', 'HPF2', 'LPF1', 'LPF2', 'NOTCH'], header):
+        poles = np.roots([1.0, a1, a2])
+        r = np.abs(poles).max()
+        check(r < 1.0, f"{name}: max |pole| = {r:.4f}")
 
-    features_raw = extractor.extract_window_features(sensor_data_raw,
-                                                     [f'EMG{i+1}' for i in range(6)])
-    features_filtered = extractor.extract_window_features(sensor_data_filtered,
-                                                          [f'EMG{i+1}' for i in range(6)])
 
-    print("\nFeature Comparison (Sensor 1):")
-    print(f"  MAV (raw): {features_raw['mav_EMG1']:.6f}")
-    print(f"  MAV (filtered): {features_filtered['mav_EMG1']:.6f}")
-    print(f"  WL (raw): {features_raw['wl_EMG1']:.6f}")
-    print(f"  WL (filtered): {features_filtered['wl_EMG1']:.6f}")
-    print(f"  ZC (raw): {features_raw['zc_EMG1']:.6f}")
-    print(f"  ZC (filtered): {features_filtered['zc_EMG1']:.6f}")
-    print(f"  SSC (raw): {features_raw['ssc_EMG1']:.6f}")
-    print(f"  SSC (filtered): {features_filtered['ssc_EMG1']:.6f}")
+def test_frequency_response():
+    print("\nTEST 4: frequency response sanity at 1000 Hz")
+    fb = EMGFilterBank(sampling_rate=FS, powerline_freq=50, verbose=False)
+    w, mag = fb.get_frequency_response('cascade')
 
-    print("\nExpected behavior:")
-    print("  - MAV should be lower (noise removed)")
-    print("  - WL should be lower (smoother signal)")
-    print("  - ZC/SSC may change (cleaner zero crossings)")
+    def at(f):
+        return mag[np.argmin(np.abs(w - f))]
+    check(at(0.5) < -40, f"0.5 Hz: {at(0.5):.1f} dB (< -40)")
+    check(at(50) < -20, f"50 Hz: {at(50):.1f} dB (< -20)")
+    check(at(100) > -3, f"100 Hz: {at(100):.2f} dB (> -3)")
+    check(at(499) < -10, f"499 Hz: {at(499):.1f} dB (< -10)")
 
-    if features_filtered['mav_EMG1'] < features_raw['mav_EMG1']:
-        print("  ✅ PASS: MAV reduced by filtering")
-    else:
-        print("  ⚠️  WARNING: MAV not reduced (may be OK depending on signal)")
 
-    print("="*70)
+def cpp_td4_reference(window: np.ndarray, n=250, zc_thr=15.0, ssc_thr=15.0, adc_max=4095.0):
+    """Transliteration of src/functions.cpp::extract_features_from_raw (float32)."""
+    f32 = np.float32
+    out = []
+    for s in range(window.shape[1]):
+        data = window[:, s].astype(np.float32)
+        mean = f32(0)
+        for v in data:
+            mean = f32(mean + v)
+        mean = f32(mean / n)
+        centered = np.array([f32(v - mean) for v in data], dtype=np.float32)
+        mav = f32(0)
+        for v in centered:
+            mav = f32(mav + abs(v))
+        mav = f32(mav / n)
+        wl = f32(0)
+        for i in range(1, n):
+            wl = f32(wl + abs(f32(data[i] - data[i - 1])))
+        zc = 0
+        for i in range(n - 1):
+            if centered[i] * centered[i + 1] < 0 and abs(f32(data[i] - data[i + 1])) >= zc_thr:
+                zc += 1
+        ssc = 0
+        for i in range(1, n - 1):
+            left = f32(data[i] - data[i - 1])
+            right = f32(data[i] - data[i + 1])
+            if f32(left * right) >= ssc_thr:
+                ssc += 1
+        out += [mav / adc_max, wl / (adc_max * n), zc / n, ssc / n]
+    return np.array(out, dtype=np.float64)
+
+
+def test_td4_equivalence():
+    print("\nTEST 5: Python TD4FeatureExtractor == C++ extract_features_from_raw")
+    rng = np.random.default_rng(1)
+    ext = TD4FeatureExtractor(window_size_ms=250, overlap_ms=125, sampling_rate=FS, verbose=False)
+    names = [f'EMG{i}' for i in range(1, 7)]
+
+    def run(windows):
+        worst = 0.0
+        for window in windows:
+            py = ext.extract_window_features(window, names)
+            py_vec = np.array([py[f'{k}_{s}'] for s in names for k in ('mav', 'wl', 'zc', 'ssc')])
+            worst = max(worst, np.abs(py_vec - cpp_td4_reference(window)).max())
+        return worst
+
+    # (a) device-like data: filtered floats, no exact threshold ties -> must match to float precision
+    cont = [rng.standard_normal((250, 6)) * rng.choice([5, 40, 300]) + rng.uniform(-50, 50, size=6) for _ in range(20)]
+    worst = run(cont)
+    check(worst < 1e-5, f"continuous data: max |python - cpp| over 20 windows = {worst:.2e} (< 1e-5)")
+
+    # (b) integer data creates exact ties at the 15-count thresholds. Differences are taken on
+    #     raw samples in both implementations, so ties are decided identically.
+    ints = [np.round(rng.standard_normal((250, 6)) * rng.choice([5, 40, 300])) for _ in range(20)]
+    worst_i = run(ints)
+    check(worst_i < 1e-5, f"integer data (threshold ties): max |python - cpp| = {worst_i:.2e} (< 1e-5)")
 
 
 def run_all_tests():
-    """Run all validation tests."""
-    print("\n" + "="*80)
-    print(" "*20 + "DSP FILTER VALIDATION SUITE")
-    print("="*80)
-
-    # Create plots directory if it doesn't exist
-    import os
-    os.makedirs('plots', exist_ok=True)
-
-    # Run tests
-    test_wl_normalization()
-    test_filter_frequency_response()
-    test_filter_time_domain()
-    test_td4_feature_extraction()
-
-    print("\n" + "="*80)
-    print("VALIDATION COMPLETE!")
-    print("="*80)
-    print("\nNext steps:")
-    print("1. Review frequency response plots in plots/ directory")
-    print("2. Upload firmware to ESP32: pio run -e data_acquisition -t upload")
-    print("3. Collect filtered test data: python training_data_collection.py")
-    print("4. Compare C++ vs Python features for parity")
-    print("="*80)
+    print("=" * 70)
+    print("FILTER + TD4 EQUIVALENCE TESTS (Python vs C++ firmware)")
+    print("=" * 70)
+    header, _ = test_coefficients_match_design()
+    test_sample_equivalence(header)
+    test_stability(header)
+    test_frequency_response()
+    test_td4_equivalence()
+    print("\n" + "=" * 70)
+    if FAILURES:
+        print(f"{len(FAILURES)} FAILURE(S):")
+        for f in FAILURES:
+            print("  - " + f)
+        return 1
+    print("ALL TESTS PASSED")
+    return 0
 
 
-if __name__ == "__main__":
-    run_all_tests()
+if __name__ == '__main__':
+    sys.exit(run_all_tests())

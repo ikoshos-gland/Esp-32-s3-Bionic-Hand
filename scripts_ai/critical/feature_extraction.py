@@ -20,6 +20,10 @@ References:
 Author: ESP32 Bionic Hand Project
 Date: 2025
 """
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # Windows console safety
+
 
 import numpy as np
 import pandas as pd
@@ -45,7 +49,8 @@ class TD4FeatureExtractor:
                  sampling_rate: int = 1000,
                  zc_threshold_adc: float = 15.0,
                  ssc_threshold_adc: float = 15.0,
-                 adc_max: float = 4095.0):
+                 adc_max: float = 4095.0,
+                 verbose: bool = True):
         """
         Initialize TD4 feature extractor
 
@@ -71,13 +76,14 @@ class TD4FeatureExtractor:
         self.overlap_samples = int((overlap_ms / 1000) * sampling_rate)
         self.hop_samples = self.window_samples - self.overlap_samples
 
-        print(f"TD4 Feature Extractor initialized (RAW signal processing):")
-        print(f"  Window size: {window_size_ms}ms ({self.window_samples} samples)")
-        print(f"  Overlap: {overlap_ms}ms ({self.overlap_samples} samples)")
-        print(f"  Hop size: {self.hop_samples} samples")
-        print(f"  ZC threshold: {zc_threshold_adc} ADC units")
-        print(f"  SSC threshold: {ssc_threshold_adc} ADC units")
-        print(f"  ADC max (global norm): {adc_max}")
+        if verbose:
+            print(f"TD4 Feature Extractor initialized (RAW signal processing):")
+            print(f"  Window size: {window_size_ms}ms ({self.window_samples} samples)")
+            print(f"  Overlap: {overlap_ms}ms ({self.overlap_samples} samples)")
+            print(f"  Hop size: {self.hop_samples} samples")
+            print(f"  ZC threshold: {zc_threshold_adc} ADC units")
+            print(f"  SSC threshold: {ssc_threshold_adc} ADC units")
+            print(f"  ADC max (global norm): {adc_max}")
 
     def compute_mav(self, signal: np.ndarray) -> float:
         """
@@ -113,7 +119,7 @@ class TD4FeatureExtractor:
         """
         return np.sum(np.abs(np.diff(signal)))
 
-    def compute_zc(self, signal: np.ndarray, threshold: float = 15.0) -> int:
+    def compute_zc(self, signal: np.ndarray, threshold: float = 15.0, raw: np.ndarray = None) -> int:
         """
         Zero Crossings (ZC) - Raw Signal Version
 
@@ -130,17 +136,22 @@ class TD4FeatureExtractor:
             ZC count
         """
         # Calculate product of consecutive samples
+        # Sign test on the centered signal; the difference is taken on the RAW
+        # samples because (x_i - m) - (x_j - m) == x_i - x_j exactly. Using raw
+        # values keeps integer differences exact in float32 (firmware) and
+        # float64 (here), so threshold ties are decided identically.
+        src = signal if raw is None else raw
         products = signal[:-1] * signal[1:]
 
         # Calculate absolute differences (threshold condition)
-        diffs = np.abs(signal[:-1] - signal[1:])
+        diffs = np.abs(src[:-1] - src[1:])
 
         # Count crossings where product is negative and difference exceeds threshold
         zc_count = np.sum((products < 0) & (diffs >= threshold))
 
         return int(zc_count)
 
-    def compute_ssc(self, signal: np.ndarray, threshold: float = 15.0) -> int:
+    def compute_ssc(self, signal: np.ndarray, threshold: float = 15.0, raw: np.ndarray = None) -> int:
         """
         Slope Sign Changes (SSC) - Raw Signal Version
 
@@ -160,8 +171,10 @@ class TD4FeatureExtractor:
             return 0
 
         # Calculate slopes
-        left_slope = signal[1:-1] - signal[:-2]   # x[i] - x[i-1]
-        right_slope = signal[1:-1] - signal[2:]   # x[i] - x[i+1]
+        # Slopes from RAW samples (mean cancels; exact for integer inputs)
+        src = signal if raw is None else raw
+        left_slope = src[1:-1] - src[:-2]   # x[i] - x[i-1]
+        right_slope = src[1:-1] - src[2:]   # x[i] - x[i+1]
 
         # Calculate products
         products = left_slope * right_slope
@@ -203,9 +216,9 @@ class TD4FeatureExtractor:
 
             # STEP 3: Calculate TD4 features on centered signal
             mav = self.compute_mav(centered_signal)
-            wl = self.compute_wl(centered_signal)
-            zc = self.compute_zc(centered_signal, self.zc_threshold_adc)
-            ssc = self.compute_ssc(centered_signal, self.ssc_threshold_adc)
+            wl = self.compute_wl(raw_signal)                    # diffs identical to centered
+            zc = self.compute_zc(centered_signal, self.zc_threshold_adc, raw=raw_signal)
+            ssc = self.compute_ssc(centered_signal, self.ssc_threshold_adc, raw=raw_signal)
 
             # STEP 4: Apply GLOBAL normalization (preserves amplitude differences)
             mav_normalized = mav / self.adc_max
@@ -225,8 +238,10 @@ class TD4FeatureExtractor:
                                        df: pd.DataFrame,
                                        sensor_columns: List[str],
                                        label_column: str = 'Movement',
-                                       apply_filters: bool = True,
-                                       powerline_freq: int = 50) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+                                       apply_filters: bool = False,
+                                       powerline_freq: int = 50,
+                                       drop_first_ms: int = 1000,
+                                       onset_skip_ms: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
         """
         Extract TD4 features from a pandas DataFrame using sliding windows
 
@@ -278,30 +293,43 @@ class TD4FeatureExtractor:
         # ============================================================================
         # STEP 1: FILTER HAZIRLIK DATA (BEFORE windowing!)
         # ============================================================================
+        # ------------------------------------------------------------------
+        # PHASE WHITELIST: keep only protocol phases. Anything else
+        # (HAZIRLIK, HAZIRLANIYOR..., PREPARATION, unknown) is dropped.
+        # A substring blacklist missed 'HAZIRLANIYOR...' and let preparation
+        # rows labelled 'Rest' into the training set.
+        # ------------------------------------------------------------------
         if 'Phase' in df.columns:
+            phase_u = df['Phase'].astype(str).str.upper().str.strip()
+            keep = phase_u.eq('HAREKET') | phase_u.str.startswith('DINLENME')
+            removed = int((~keep).sum())
+            dropped_phases = sorted(df.loc[~keep, 'Phase'].astype(str).unique().tolist())
+            df = df[keep]
             print(f"\n{'='*60}")
-            print("CLEANING DATA: Removing 'HAZIRLIK' (preparation) phase")
+            print("CLEANING DATA: phase whitelist (HAREKET, DINLENME*)")
             print(f"{'='*60}")
-            
-            initial_count = len(df)
-            
-            # Filter out rows where Phase contains 'HAZIRLIK' (case-insensitive)
-            df = df[~df['Phase'].str.upper().str.contains('HAZIRLIK', na=False)]
-            
-            # Also filter out 'PREPARATION' (English variant)
-            df = df[~df['Phase'].str.upper().str.contains('PREPARATION', na=False)]
-            
-            removed_count = initial_count - len(df)
-            print(f"  Removed {removed_count} raw samples (Phase='HAZIRLIK')")
+            print(f"  Removed {removed} rows with phases {dropped_phases}")
             print(f"  Remaining raw samples: {len(df)}")
             print(f"{'='*60}\n")
         else:
-            print("\n⚠️  WARNING: 'Phase' column not found. Skipping HAZIRLIK filtering!")
-            print("   This is OK if your data doesn't have preparation phases.\n")
+            print("\nWARNING: 'Phase' column not found, no phase filtering applied.\n")
 
-        # ============================================================================
-        # STEP 2: EXTRACT FEATURES FROM WINDOWS
-        # ============================================================================
+        # Drop the first drop_first_ms of the recording (filter settling,
+        # operator still adjusting) and the first onset_skip_ms after every
+        # phase change (reaction time, transition windows).
+        if drop_first_ms > 0 and len(df) > 0:
+            n0 = int(drop_first_ms / 1000 * self.sampling_rate)
+            df = df.iloc[n0:]
+            print(f"  Dropped first {drop_first_ms} ms ({n0} samples) of the recording")
+        if onset_skip_ms > 0 and 'Phase' in df.columns and len(df) > 0:
+            seg_key = (df['Movement'].astype(str) + '|' + df['Phase'].astype(str))
+            seg_id = (seg_key != seg_key.shift()).cumsum()
+            pos = df.groupby(seg_id).cumcount()
+            n_skip = int(onset_skip_ms / 1000 * self.sampling_rate)
+            before = len(df)
+            df = df[pos >= n_skip]
+            print(f"  Dropped first {onset_skip_ms} ms of every segment ({before - len(df)} samples)")
+
         print(f"Extracting windows from {len(df)} samples...")
         print(f"Sensors: {sensor_columns}")
 
@@ -482,7 +510,9 @@ def extract_features_from_csv(csv_path: str,
                               output_dir: str = 'scripts_ai/data/features',
                               sensor_columns: List[str] = None,
                               apply_filters: bool = False,
-                              powerline_freq: int = 50) -> str:
+                              powerline_freq: int = 50,
+                              drop_first_ms: int = 1000,
+                              onset_skip_ms: int = 0) -> str:
     """
     Extract TD4 features from a CSV file and save to NPZ format
 
@@ -519,6 +549,12 @@ def extract_features_from_csv(csv_path: str,
     print("C++ applies DSP filters and encodes: float → uint16_t [0, 4095]")
     print("Python decodes: uint16_t [0, 4095] → bipolar float [-2047.5, +2047.5]")
 
+    bad = {c: int((df[c] > 4095).sum()) for c in sensor_columns if c in df.columns and (df[c] > 4095).any()}
+    if bad:
+        raise ValueError(
+            f"CSV contains values > 4095 (uint16 wrap-around of unencoded negative filter output): {bad}. "
+            "This recording was made with firmware without bipolar encoding and cannot be used for training. "
+            "Re-record with the current data_acquisition firmware.")
     for col in sensor_columns:
         if col in df.columns:
             df[col] = df[col] - 2047.5  # Decode: uint16_t → bipolar float
@@ -548,7 +584,9 @@ def extract_features_from_csv(csv_path: str,
     features, labels, reps, feature_names = extractor.extract_features_from_dataframe(
         df, sensor_columns, label_column='Movement',
         apply_filters=apply_filters,  # Default False (C++ already applied filters)
-        powerline_freq=powerline_freq
+        powerline_freq=powerline_freq,
+        drop_first_ms=drop_first_ms,
+        onset_skip_ms=onset_skip_ms
     )
 
     # Features are already globally normalized during extraction
@@ -626,6 +664,13 @@ Examples:
         help='Output directory for NPZ file (default: scripts_ai/data/features)'
     )
 
+    parser.add_argument('--apply-filters', action='store_true',
+                        help='Apply the causal Python filter bank (only for RAW, unfiltered CSVs; '
+                             'CSVs from the current firmware are already filtered on the device)')
+    parser.add_argument('--drop-first-ms', type=int, default=1000,
+                        help='Discard the first N ms of the recording (default 1000)')
+    parser.add_argument('--onset-skip-ms', type=int, default=0,
+                        help='Discard the first N ms after every phase change (default 0)')
     args = parser.parse_args()
 
     # Generate sensor column names dynamically
@@ -638,7 +683,10 @@ Examples:
     output_path = extract_features_from_csv(
         args.csv_path,
         output_dir=args.output,
-        sensor_columns=sensor_columns
+        sensor_columns=sensor_columns,
+        apply_filters=args.apply_filters,
+        drop_first_ms=args.drop_first_ms,
+        onset_skip_ms=args.onset_skip_ms
     )
 
     print("\n" + "="*60)

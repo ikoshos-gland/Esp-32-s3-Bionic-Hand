@@ -14,9 +14,14 @@ Output: C++ header format ready for filters.cpp
 Author: ESP32 Bionic Hand Project
 Date: 2025
 """
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # Windows console safety
+
 
 import numpy as np
 from scipy import signal
+import os
 import sys
 
 
@@ -144,30 +149,34 @@ def generate_cpp_header(coeffs_1000, coeffs_2000, powerline_freq):
  * - Low-Pass: 450 Hz, 4th-order Butterworth (2 biquad stages)
  * - Notch: {powerline_freq} Hz, Q=12.5 (1 biquad)
  *
- * Two sets of coefficients for different sampling rates:
- * - 1000 Hz (real-time inference mode)
- * - 2000 Hz (data acquisition mode)
+ * The whole system samples at 1000 Hz (data acquisition and inference), so
+ * the 1000 Hz set is the default. The 2000 Hz set is only compiled when
+ * FILTER_SAMPLING_2000HZ is defined; it is kept for experiments.
  */
+#ifndef FILTER_COEFFICIENTS_{powerline_freq}HZ_H
+#define FILTER_COEFFICIENTS_{powerline_freq}HZ_H
 
+#ifndef FILTER_SAMPLING_2000HZ
 // ============================================================================
-// 1000 Hz SAMPLING RATE (Real-Time Inference)
+// 1000 Hz SAMPLING RATE (default)
 // ============================================================================
-#ifndef DATA_ACQUISITION_MODE
+#define FILTER_SAMPLING_RATE_HZ 1000
 
 {sos_to_cpp_biquad(coeffs_1000['hpf'], 'HPF')}
 {sos_to_cpp_biquad(coeffs_1000['lpf'], 'LPF')}
 {sos_to_cpp_biquad(coeffs_1000['notch'], 'NOTCH')}
-#endif  // !DATA_ACQUISITION_MODE
-
+#else
 // ============================================================================
-// 2000 Hz SAMPLING RATE (Data Acquisition)
+// 2000 Hz SAMPLING RATE (experimental, FILTER_SAMPLING_2000HZ defined)
 // ============================================================================
-#ifdef DATA_ACQUISITION_MODE
+#define FILTER_SAMPLING_RATE_HZ 2000
 
 {sos_to_cpp_biquad(coeffs_2000['hpf'], 'HPF')}
 {sos_to_cpp_biquad(coeffs_2000['lpf'], 'LPF')}
 {sos_to_cpp_biquad(coeffs_2000['notch'], 'NOTCH')}
-#endif  // DATA_ACQUISITION_MODE
+#endif  // FILTER_SAMPLING_2000HZ
+
+#endif  // FILTER_COEFFICIENTS_{powerline_freq}HZ_H
 """
     return header
 
@@ -211,7 +220,7 @@ def main():
     cpp_header = generate_cpp_header(coeffs_1000, coeffs_2000, powerline_freq)
 
     # Save to file
-    output_file = f"../../src/filter_coefficients_{powerline_freq}hz.h"
+    output_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "include", f"filter_coefficients_{powerline_freq}hz.h")
     with open(output_file, 'w') as f:
         f.write(cpp_header)
 
@@ -220,7 +229,7 @@ def main():
     print("="*70)
 
     print("\n📋 Next Steps:")
-    print(f"1. Copy contents to filters.cpp or #include this file")
+    print(f"1. The header is written straight into include/ and picked up by filters.cpp")
     print(f"2. Update POWERLINE_FREQ_HZ in filters.h to {powerline_freq}")
     print(f"3. Verify coefficients compile without errors")
     print(f"4. Test filters with validate_filters.py")

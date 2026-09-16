@@ -4,6 +4,7 @@
  */
 
 #include "servo_controller.h"
+#include "model_meta.h"   // GESTURE_NAMES[] shared with the model
 
 // ============================================================================
 // GESTURE-TO-SERVO ANGLE MAPPING TABLE
@@ -87,12 +88,12 @@ void ServoController::begin() {
 
     // Attach all servos to their GPIO pins
     for (int i = 0; i < NUM_SERVOS; i++) {
-        int channel = servos[i].attach(servo_pins[i]);
-
-        if (channel == 0) {
+        servos[i].setPeriodHertz(50);
+        servos[i].attach(servo_pins[i], 500, 2400);
+        if (!servos[i].attached()) {
             Serial.printf("ERROR: Failed to attach servo %d to GPIO %d\n", i, servo_pins[i]);
         } else {
-            Serial.printf("✅ Servo %d attached to GPIO %d (channel %d)\n", i, servo_pins[i], channel);
+            Serial.printf("Servo %d attached to GPIO %d\n", i, servo_pins[i]);
         }
     }
 
@@ -128,12 +129,10 @@ void ServoController::moveToGesture(int gesture_id) {
     const int* angles = gesture_angles[gesture_id];
 
     // Debug output
-    const char* gesture_names[] = {"Rest", "Fist", "Open", "Point", "Victory",
-                                   "OK", "ThumbUp", "ThumbDn", "Grasp", "Pinch", "WristFlex"};
     const char* servo_names[] = {"Thumb_Rot", "Thumb_Flex", "Index", "Middle", "Ring", "Pinky"};
 
     Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    Serial.printf("🎯 GESTURE DETECTED: %s (ID: %d)\n", gesture_names[gesture_id], gesture_id);
+    Serial.printf("Servo target: %s (ID: %d)\n", GESTURE_NAMES[gesture_id], gesture_id);
     Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     Serial.println("Servo Movements:");

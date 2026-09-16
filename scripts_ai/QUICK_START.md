@@ -29,7 +29,7 @@ python scripts_ai/critical/feature_extraction.py data/training_data_20251126.csv
 ### 3️⃣ Model Eğit
 ```bash
 # Model eğit ve TFLite oluştur
-python scripts_ai/critical/train_test_model.py
+python scripts_ai/critical/train_test_model.py --cv
 
 # Çıktı: 
 #   data/models/emg_model_YYYYMMDD_HHMMSS.tflite

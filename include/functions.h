@@ -1,100 +1,106 @@
 #ifndef FUNCTIONS_H_
-#define FUNCTIONS_H_ //header guard to prevent adding it multiple times
+#define FUNCTIONS_H_
 
-#include <Arduino.h>  // For constrain() macro (needed by encode_bipolar)
+#include <Arduino.h>
 #include <stdint.h>
-//C++ mathematical functions
 #include <cmath>
 
-// Feature extraction configuration - TD4 Features (Literature-Based)
-// Hudgins' TD4: MAV, WL, ZC, SSC (4 features × 6 EMG sensors = 24 total)
-#define NUM_FEATURES 24
-#define NUM_SENSORS  6
+// Class names, REST index and feature count come from the auto-generated
+// model header so that firmware and trained model can never disagree.
+#include "model_meta.h"
 
-// Raw data collection configuration
-// CHANGED: Using raw signal processing instead of RMS windows
-#define RAW_WINDOW_SIZE  250   // 250ms window (250 samples at 1kHz) - Unified 1000 Hz sampling
-#define SAMPLING_FREQ    1000  // 1000 Hz sampling rate - Unified for all modes
+// ============================================================================
+// FEATURE CONFIGURATION (Hudgins TD4: MAV, WL, ZC, SSC per sensor)
+// ============================================================================
+#define NUM_SENSORS      6
+#define NUM_FEATURES     (4 * NUM_SENSORS)
 
-// Global ADC normalization bounds (12-bit ADC on ESP32)
-// CRITICAL: Must match Python training pipeline normalization
+static_assert(NUM_FEATURES == MODEL_NUM_FEATURES,
+              "model_meta.h: deployed model input size does not match NUM_FEATURES");
+static_assert(MODEL_NUM_CLASSES >= 2, "model_meta.h: model must have at least 2 classes");
+static_assert(REST_CLASS_INDEX >= 0 && REST_CLASS_INDEX < MODEL_NUM_CLASSES,
+              "model_meta.h: REST_CLASS_INDEX out of range");
+
+// ============================================================================
+// SAMPLING CONFIGURATION (unified 1000 Hz, must match Python training)
+// ============================================================================
+#define SAMPLING_FREQ    1000                  // Hz
+#define SAMPLE_PERIOD_US (1000000 / SAMPLING_FREQ)
+#define RAW_WINDOW_SIZE  250                   // 250 ms window at 1 kHz
+#define INFERENCE_HOP    250                   // new samples between two inferences
+#define RING_SIZE        1024                  // per-sensor ring buffer (power of two)
+
+static_assert((RING_SIZE & (RING_SIZE - 1)) == 0, "RING_SIZE must be a power of two");
+static_assert(RING_SIZE >= 2 * RAW_WINDOW_SIZE, "RING_SIZE must hold at least two windows");
+static_assert(INFERENCE_HOP >= 1 && INFERENCE_HOP <= RAW_WINDOW_SIZE, "invalid INFERENCE_HOP");
+
+// Global ADC normalization bounds (12-bit ADC on ESP32-S3)
 #define ADC_MIN_GLOBAL   0.0f
 #define ADC_MAX_GLOBAL   4095.0f
 
-// Safe ESP32-S3 GPIO pins (avoiding UART0/Serial conflicts)
-// CHANGED: GPIO 1-2 conflict with UART0, now using ADC1 pins 4-7 and ADC2 pins 15-16
-// WARNING: You must physically reconnect sensors to these new pins!
-#define pin_MW1 4   // GPIO 4  (ADC1_CH3)
-#define pin_MW2 5   // GPIO 5  (ADC1_CH4)
-#define pin_MW3 6   // GPIO 6  (ADC1_CH5)
-#define pin_MW4 7   // GPIO 7  (ADC1_CH6)
-#define pin_MW5 15  // GPIO 15 (ADC2_CH4)
-#define pin_MW6 16  // GPIO 16 (ADC2_CH5)
+// TD4 thresholds in ADC units (must match Python)
+#define ZC_THRESHOLD_ADC  15.0f
+#define SSC_THRESHOLD_ADC 15.0f
 
 // ============================================================================
-// BIPOLAR SIGNAL ENCODING/DECODING
+// GPIO (ADC1 pins 4-7, ADC2 pins 15-16; GPIO1/2 are UART0 and must be avoided)
 // ============================================================================
-// HPF (High-Pass Filter) creates bipolar signals (negative values after DC removal),
-// but uint16_t serial protocol requires [0, 4095] range.
-// Solution: Use offset encoding to preserve negative values during transmission.
+#define pin_MW1 4   // ADC1_CH3
+#define pin_MW2 5   // ADC1_CH4
+#define pin_MW3 6   // ADC1_CH5
+#define pin_MW4 7   // ADC1_CH6
+#define pin_MW5 15  // ADC2_CH4
+#define pin_MW6 16  // ADC2_CH5
 
-#define BIPOLAR_OFFSET 2047.5f  // ADC midpoint (4095 / 2) for symmetric bipolar range
+// ============================================================================
+// BIPOLAR SIGNAL ENCODING (data acquisition serial protocol)
+// ============================================================================
+// The HPF produces bipolar values; the 16-bit serial protocol carries [0, 4095].
+// Encoding adds an offset; Python decodes with  value - 2047.5
+#define BIPOLAR_OFFSET 2047.5f
 
-/**
- * Encode bipolar float to uint16_t for serial transmission
- *
- * Maps: float [-2047.5, +2047.5] → uint16_t [0, 4095]
- *
- * Example transformations:
- *   -2000.0 →   48  (negative preserved as low values)
- *       0.0 → 2048  (DC center maps to ADC midpoint)
- *   +2000.0 → 4048  (positive maps to high values)
- *
- * @param filtered Bipolar filtered signal (can be negative)
- * @return Encoded uint16_t in range [0, 4095]
- */
 inline uint16_t encode_bipolar(float filtered) {
-    return (uint16_t)constrain(filtered + BIPOLAR_OFFSET, 0.0f, 4095.0f);
+  float v = filtered + BIPOLAR_OFFSET;
+  if (v < 0.0f) v = 0.0f;
+  if (v > 4095.0f) v = 4095.0f;
+  return (uint16_t)v;
 }
 
-/**
- * Decode uint16_t to bipolar float (for documentation - Python uses own decoding)
- *
- * Maps: uint16_t [0, 4095] → float [-2047.5, +2047.5]
- *
- * Note: This function is for C++ reference only.
- * Python training pipeline implements its own decoding:
- *   df[col] = df[col] - 2047.5
- *
- * @param encoded Encoded uint16_t from serial transmission
- * @return Decoded bipolar float
- */
 inline float decode_bipolar(uint16_t encoded) {
-    return (float)encoded - BIPOLAR_OFFSET;
+  return (float)encoded - BIPOLAR_OFFSET;
 }
 
-// Raw signal buffers (6 sensors × RAW_WINDOW_SIZE samples)
-// CHANGED: Storing raw ADC values instead of RMS windows
-// NOTE: Buffer is private to functions.cpp (static) for thread safety
+// ============================================================================
+// CONTINUOUS SAMPLING (esp_timer, 1 kHz, filters run per sample, never paused)
+// ============================================================================
 
-// Main pipeline functions
-// CHANGED: Simplified pipeline - removed RMS preprocessing
+// Configure ADC, initialise filters and start the periodic sampler.
+void sampling_start();
+
+// Statistics for diagnostics.
+struct SamplingStats {
+  uint32_t samples_total;     // samples written since start
+  uint32_t overruns;          // windows where the consumer fell behind by > RING_SIZE
+  uint32_t max_callback_us;   // worst-case sampler callback duration
+};
+SamplingStats sampling_stats();
+
+// Called repeatedly while prelim_collection() waits for the next window.
+// Defined weak so that builds without a servo controller need not provide it.
+void sampling_idle_hook() __attribute__((weak));
+
+// Wait until INFERENCE_HOP new samples exist, snapshot the last RAW_WINDOW_SIZE
+// samples of every sensor and return the 24 TD4 features.
 float *prelim_collection();
+
+// TD4 extraction on the current snapshot (exposed for tests).
 float *extract_features_from_raw();
 
-// TD4 Feature Extraction Functions (Hudgins et al.)
-// Literature-validated time-domain features for EMG pattern recognition
-
-// MAV: Mean Absolute Value - average signal amplitude
-float compute_mav(float data[], int len);
-
-// WL: Waveform Length - signal complexity measure
-float compute_wl(float data[], int len);
-
-// ZC: Zero Crossings - frequency estimate (with threshold for noise reduction)
-int compute_zc(float data[], int len, float threshold);
-
-// SSC: Slope Sign Changes - frequency content indicator (with threshold)
-int compute_ssc(float data[], int len, float threshold);
+// TD4 primitives (single implementation, used by extract_features_from_raw)
+float compute_mav(const float data[], int len);
+float compute_wl(const float data[], int len);
+// zc: sign test on centered[], threshold on |raw[i]-raw[i+1]|; ssc: slopes from raw[]
+int   compute_zc(const float centered[], const float raw[], int len, float threshold);
+int   compute_ssc(const float raw[], int len, float threshold);
 
 #endif  // FUNCTIONS_H_

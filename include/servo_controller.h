@@ -19,10 +19,12 @@
 
 #include <Arduino.h>
 #include <ESP32Servo.h>
+#include "model_meta.h"
 
 // Configuration constants
 #define NUM_SERVOS 6
-#define NUM_GESTURES 11
+#define NUM_GESTURES MODEL_NUM_CLASSES
+static_assert(MODEL_NUM_CLASSES == 11, "gesture_angles table has 11 rows; update it when the class set changes");
 #define DEFAULT_INTERPOLATION_DURATION_MS 500
 
 /**

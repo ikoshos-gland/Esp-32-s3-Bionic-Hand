@@ -11,16 +11,18 @@
  * - Low-Pass: 450 Hz, 4th-order Butterworth (2 biquad stages)
  * - Notch: 50 Hz, Q=12.5 (1 biquad)
  *
- * UNIFIED 1000 Hz SAMPLING:
- * Both data_acquisition and real_time_inference now use 1000 Hz sampling.
- * The 1000 Hz coefficients below are used by default (DATA_ACQUISITION_MODE not defined).
- * The 2000 Hz coefficients are kept for future reference but currently unused.
+ * The whole system samples at 1000 Hz (data acquisition and inference), so
+ * the 1000 Hz set is the default. The 2000 Hz set is only compiled when
+ * FILTER_SAMPLING_2000HZ is defined; it is kept for experiments.
  */
+#ifndef FILTER_COEFFICIENTS_50HZ_H
+#define FILTER_COEFFICIENTS_50HZ_H
 
+#ifndef FILTER_SAMPLING_2000HZ
 // ============================================================================
-// 1000 Hz SAMPLING RATE (Real-Time Inference)
+// 1000 Hz SAMPLING RATE (default)
 // ============================================================================
-#ifndef DATA_ACQUISITION_MODE
+#define FILTER_SAMPLING_RATE_HZ 1000
 
   const float HPF_STAGE1_B0 = 0.8484752955f;
   const float HPF_STAGE1_B1 = -1.6969505910f;
@@ -52,12 +54,11 @@
   const float NOTCH_A1 = -1.8785057900f;
   const float NOTCH_A2 = 0.9751778762f;
 
-#endif  // !DATA_ACQUISITION_MODE
-
+#else
 // ============================================================================
-// 2000 Hz SAMPLING RATE (Data Acquisition)
+// 2000 Hz SAMPLING RATE (experimental, FILTER_SAMPLING_2000HZ defined)
 // ============================================================================
-#ifdef DATA_ACQUISITION_MODE
+#define FILTER_SAMPLING_RATE_HZ 2000
 
   const float HPF_STAGE1_B0 = 0.9211709935f;
   const float HPF_STAGE1_B1 = -1.8423419870f;
@@ -89,4 +90,6 @@
   const float NOTCH_A1 = -1.9630423600f;
   const float NOTCH_A2 = 0.9875119299f;
 
-#endif  // DATA_ACQUISITION_MODE
+#endif  // FILTER_SAMPLING_2000HZ
+
+#endif  // FILTER_COEFFICIENTS_50HZ_H

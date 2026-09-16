@@ -1,24 +1,48 @@
-/*Libraries*/
+/*
+ * ESP32-S3 Bionic Hand: real-time EMG gesture classification
+ * ============================================================
+ *
+ * Pipeline: continuous 1 kHz sampling (esp_timer) -> IIR filters -> 250 ms
+ * window -> TD4 features -> TFLite Micro MLP -> decision layer -> servos.
+ *
+ * Decision layer:
+ *   - softmax confidence threshold (CONFIDENCE_THRESHOLD)
+ *   - debounce: DEBOUNCE_FRAMES identical confident predictions in a row;
+ *     any low-confidence frame resets the counter
+ *   - rest fallback: REST_FALLBACK_FRAMES low-confidence frames in a row
+ *     emit REST (hand opens instead of staying frozen)
+ *   - motion lock: MOTION_LOCK_MS after a movement; REST bypasses the lock and
+ *     never starts one
+ *
+ * Class names and REST index come from model_meta.h (generated at training
+ * time), so a retrained model cannot silently change the label order.
+ */
+
 #include <Arduino.h>
-//Tensorflow model converted to C++
-#include "model.h"
-//functions
+#include "model.h"        // model_tflite[] byte array (include ONLY here)
+#include "model_meta.h"   // GESTURE_NAMES[], MODEL_NUM_CLASSES, REST_CLASS_INDEX
 #include "functions.h"
-//DSP filters for EMG signal conditioning
 #include "filters.h"
-//Servo controller for robotic hand
 #include "servo_controller.h"
 
-//Tensorflow custom library for ESP32 (from lib folder)
 #include <TensorFlowLite_ESP32.h>
-// Use the experimental micro API (which is in lib folder)
 #include "tensorflow/lite/experimental/micro/kernels/all_ops_resolver.h"
 #include "tensorflow/lite/experimental/micro/micro_error_reporter.h"
 #include "tensorflow/lite/experimental/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/version.h"
 
-// Globals
+// ============================================================================
+// DECISION LAYER CONFIGURATION
+// ============================================================================
+#define CONFIDENCE_THRESHOLD 0.8f
+#define DEBOUNCE_FRAMES      2      // consecutive confident frames to confirm
+#define REST_FALLBACK_FRAMES 4      // low-confidence frames before emitting REST (~1 s)
+#define MOTION_LOCK_MS       1000   // cooldown after a movement gesture
+
+// ============================================================================
+// TFLITE GLOBALS
+// ============================================================================
 namespace {
 tflite::ErrorReporter* error_reporter = nullptr;
 const tflite::Model* model = nullptr;
@@ -26,233 +50,150 @@ tflite::MicroInterpreter* interpreter = nullptr;
 TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
 
-// Create an area of memory for input, output, and intermediate arrays
-// TD4 features: 24 features (4 TD4 × 6 sensors) with Wide & Deep MLP
-// Float32 model (no quantization for TFLite v2.1.1 compatibility)
-constexpr int kTensorArenaSize = 30 * 1024;  // 30KB for TD4 + MLP
-alignas(16) uint8_t tensor_arena[kTensorArenaSize];  // 16-byte aligned
+// Weights stay in flash; the arena holds activations and tensor metadata only.
+constexpr int kTensorArenaSize = 30 * 1024;
+alignas(16) uint8_t tensor_arena[kTensorArenaSize];
 }  // namespace
 
-int this_predict = -1;
-int last_predict = -1;
+// ============================================================================
+// DECISION STATE
+// ============================================================================
+static int debounce_gesture = -1;
+static int debounce_counter = 0;
+static int no_confidence_frames = 0;
+static int last_emitted = -1;                 // last gesture sent to the hand
+static unsigned long last_movement_time = 0;  // millis() of last non-REST emission
 
-// Debouncing: Require stable predictions across multiple frames
-#define DEBOUNCE_FRAMES 2              // 2 consecutive predictions (2×270ms = ~540ms)
-int debounce_counter = 0;              // How many times current gesture seen consecutively
-int debounce_gesture = -1;             // Which gesture we're currently debouncing
-int confirmed_gesture = -1;            // Last confirmed stable gesture
-
-// Motion Locking: Prevent rapid re-detection after gesture confirmation
-#define MOTION_LOCK_MS 1000            // 1000ms cooldown after gesture detection
-unsigned long last_gesture_time = 0;   // Timestamp of last detected gesture (millis)
-
-// Servo Controller: Controls 6 servos for robotic hand gestures
 ServoController servoController;
 
-void setup() {
-  Serial.begin(921600);
-  Serial.println("BOOT: Serial started at 921600 baud");
-  delay(1000);
-  Serial.println("BOOT: Delay complete, initializing...");
+// Called by prelim_collection() while waiting for the next window.
+void sampling_idle_hook() { servoController.update(); }
 
-  Serial.println("\n\n=== STARTING SETUP ===");
-
-  // ADDED: Memory diagnostics to detect memory issues
-  Serial.printf("BOOT: Free heap: %d bytes (%.1f KB)\n", ESP.getFreeHeap(), ESP.getFreeHeap()/1024.0);
-  Serial.printf("BOOT: Free PSRAM: %d bytes (%.1f KB)\n", ESP.getFreePsram(), ESP.getFreePsram()/1024.0);
-  Serial.printf("BOOT: Tensor arena size: %d bytes (%d KB)\n", kTensorArenaSize, kTensorArenaSize/1024);
-
-  // Configure ADC attenuation for 0-3.3V range (12-bit: 0-4095)
-  // ESP32-S3 ADC defaults to 11dB attenuation (0-2500mV), we need full range
-  analogSetAttenuation(ADC_11db);  // 0-3.3V mapping to 0-4095
-  Serial.println("✅ ADC configured: 11dB attenuation (0-3.3V → 0-4095)");
-
-  // Initialize DSP filters (HPF + LPF + Notch)
-  filters_init();
-
-  // Set up TensorFlow Lite
-  static tflite::MicroErrorReporter micro_error_reporter;
-  error_reporter = &micro_error_reporter;
-
-  // Map the model
-  Serial.println("BOOT: Loading TFLite model...");
-  model = tflite::GetModel(model_tflite);
-  Serial.printf("BOOT: Model schema version: %d (expected: %d)\n",
-                model->version(), TFLITE_SCHEMA_VERSION);
-
-  if (model->version() != TFLITE_SCHEMA_VERSION) {
-    error_reporter->Report("Model schema mismatch!");
-    Serial.println("❌ FATAL: Model schema version mismatch");
-    Serial.println("   Device is HALTED - Press reset button to retry");
-    while(1) {
-      delay(1000);
-      Serial.print(".");  // Heartbeat shows device is alive but halted
-    }
-  }
-  Serial.println("BOOT: Model loaded successfully");
-
-  // Pull in all operations
-  static tflite::ops::micro::AllOpsResolver resolver;
-
-  // Build interpreter
-  static tflite::MicroInterpreter static_interpreter(
-      model, resolver, tensor_arena, kTensorArenaSize, error_reporter);
-  interpreter = &static_interpreter;
-
-  // Allocate tensors
-  Serial.println("BOOT: Allocating TensorFlow tensors...");
-  TfLiteStatus allocate_status = interpreter->AllocateTensors();
-  Serial.printf("BOOT: AllocateTensors() status: %d (0=OK, other=FAIL)\n", allocate_status);
-
-  if (allocate_status != kTfLiteOk) {
-    error_reporter->Report("AllocateTensors() failed");
-    Serial.println("❌ FATAL: TensorFlow Lite memory allocation failed");
-    Serial.printf("   Tensor arena size: %d bytes (%d KB)\n", kTensorArenaSize, kTensorArenaSize/1024);
-    Serial.println("   Possible causes:");
-    Serial.println("   - Model too large for tensor arena");
-    Serial.println("   - Insufficient memory available");
-    Serial.println("   - Increase kTensorArenaSize in main.cpp");
-    Serial.println("\n🛑 Device HALTED - Press reset button to retry");
-    while(1) {
-      delay(1000);
-      Serial.print(".");  // Heartbeat shows device is alive but halted
-    }
-  }
-  Serial.println("BOOT: Tensors allocated successfully");
-
-  // Get input and output tensors
-  input = interpreter->input(0);
-  output = interpreter->output(0);
-
-  // Initialize servo controller (after TFLite to ensure memory allocation succeeds)
-  Serial.println("BOOT: Initializing servo controller...");
-  servoController.begin();
-  servoController.setHome();
-  Serial.println("✅ Servo controller initialized and moved to home position");
-
-  Serial.println("Setup complete! Starting gesture classification...");
-  Serial.println("==================================================");
-  Serial.println();
-  Serial.println("✅ TD4 Feature Extraction Active (Literature-Based)");
-  Serial.printf("   Features: %d (4 TD4 × 6 EMG sensors)\n", NUM_FEATURES);
-  Serial.println("   Model: Wide & Deep MLP (Float32 - No Quantization)");
-  Serial.println("   TD4: MAV, WL, ZC, SSC (Hudgins et al.)");
-  Serial.println("   TFLite: v2.1.1 compatible (SOFTMAX v1)");
+static void halt_forever(const char* why) {
+  Serial.print("FATAL: "); Serial.println(why);
+  Serial.println("Device HALTED - press reset");
+  while (true) { delay(1000); Serial.print("."); }
 }
 
+static void emit_gesture(int idx, const char* reason) {
+  Serial.printf("GESTURE DETECTED: %s (%s)\n", GESTURE_NAMES[idx], reason);
+  servoController.moveToGesture(idx);
+  last_emitted = idx;
+  if (idx != REST_CLASS_INDEX) last_movement_time = millis();
+}
 
+// ============================================================================
+// SETUP
+// ============================================================================
+void setup() {
+  Serial.begin(921600);
+  delay(1000);
+  Serial.println("\n=== ESP32-S3 Bionic Hand: real-time inference ===");
+  Serial.printf("Free heap: %u bytes, free PSRAM: %u bytes\n", ESP.getFreeHeap(), ESP.getFreePsram());
+  Serial.printf("Model: %s\n", MODEL_DESCRIPTION);
+  Serial.printf("Trained on: %s\n", MODEL_TRAINING_DATA);
+  Serial.printf("Classes (%d):", MODEL_NUM_CLASSES);
+  for (int i = 0; i < MODEL_NUM_CLASSES; i++) Serial.printf(" [%d]%s", i, GESTURE_NAMES[i]);
+  Serial.printf("\nREST index: %d\n", REST_CLASS_INDEX);
 
+  // TFLite Micro
+  static tflite::MicroErrorReporter micro_error_reporter;
+  error_reporter = &micro_error_reporter;
+  model = tflite::GetModel(model_tflite);
+  if (model->version() != TFLITE_SCHEMA_VERSION) halt_forever("model schema version mismatch");
+
+  static tflite::ops::micro::AllOpsResolver resolver;
+  static tflite::MicroInterpreter static_interpreter(model, resolver, tensor_arena,
+                                                     kTensorArenaSize, error_reporter);
+  interpreter = &static_interpreter;
+  if (interpreter->AllocateTensors() != kTfLiteOk) halt_forever("AllocateTensors failed (increase kTensorArenaSize)");
+
+  input = interpreter->input(0);
+  output = interpreter->output(0);
+  if (input->dims->data[input->dims->size - 1] != NUM_FEATURES) halt_forever("model input size != NUM_FEATURES");
+  if (output->dims->data[output->dims->size - 1] != MODEL_NUM_CLASSES) halt_forever("model output size != MODEL_NUM_CLASSES");
+  if (input->type != kTfLiteFloat32 || output->type != kTfLiteFloat32) halt_forever("model is not float32");
+  Serial.println("TFLite ready");
+
+  // Servos, then sampling (sampling last so the first window is clean)
+  servoController.begin();
+  servoController.setHome();
+  last_emitted = REST_CLASS_INDEX;
+
+  sampling_start();
+  Serial.println("Setup complete. Classifying...\n");
+}
+
+// ============================================================================
+// LOOP
+// ============================================================================
 void loop() {
-  // Get sensor features (24 TD4 features from 6 EMG sensors)
-  float* features = prelim_collection();
+  servoController.update();
 
-  // Copy features into TFLite input tensor buffer
-  // Float32 model - direct copy, no quantization needed
-  for (int i = 0; i < NUM_FEATURES; i++) {
-    input->data.f[i] = features[i];
-  }
+  float* feats = prelim_collection();
+  for (int i = 0; i < NUM_FEATURES; i++) input->data.f[i] = feats[i];
 
-  // DEBUG: Display TD4 feature values
-  Serial.println("----------------------------------");
-  Serial.println("TD4 Features (24 total):");
-  Serial.printf("  Input tensor size: %d\n", input->dims->data[1]);
-  Serial.printf("  Features extracted: %d\n", NUM_FEATURES);
-
-  // Display features by sensor (4 features per sensor)
-  const char* td4_names[] = {"MAV", "WL", "ZC", "SSC"};
-  for (int sensor = 0; sensor < 6; sensor++) {
-    Serial.printf("  EMG%d: ", sensor + 1);
-    for (int feat = 0; feat < 4; feat++) {
-      int idx = sensor * 4 + feat;
-      Serial.printf("%s=%.3f ", td4_names[feat], features[idx]);
-    }
-    Serial.println();
-  }
-
-  // Run inference
-  TfLiteStatus invoke_status = interpreter->Invoke();
-  if (invoke_status != kTfLiteOk) {
+  if (interpreter->Invoke() != kTfLiteOk) {
     error_reporter->Report("Invoke failed");
     return;
   }
 
-  // Display output probabilities (Float32 - no dequantization needed)
-  Serial.print("Probabilities: ");
-  for(int i = 0; i < 11; i++) {
-    float prob = output->data.f[i];  // Direct Float32 access
-    Serial.printf("%.3f ", prob);
+  // argmax with confidence threshold
+  int pred = -1;
+  float best = CONFIDENCE_THRESHOLD;
+  for (int i = 0; i < MODEL_NUM_CLASSES; i++) {
+    float p = output->data.f[i];
+    if (p > best) { best = p; pred = i; }
   }
+
+  // Debug line: features summary + probabilities
+  Serial.print("MAV:");
+  for (int s = 0; s < NUM_SENSORS; s++) Serial.printf(" %.4f", feats[4 * s]);
+  Serial.print(" | P:");
+  for (int i = 0; i < MODEL_NUM_CLASSES; i++) Serial.printf(" %.2f", output->data.f[i]);
   Serial.println();
 
-  // Find highest confidence gesture (above threshold)
-  this_predict = -1;
-  float max_confidence = 0.8;  // Threshold (TEMPORARILY LOWERED: 0.5 = 50%, normally 0.8 = 80%)
-  for (int i = 0; i < 11; i++) {
-    float prob = output->data.f[i];  // Direct Float32 access
-    if (prob > max_confidence) {
-      max_confidence = prob;
-      this_predict = i;
+  // ---- debounce + rest fallback ----
+  int confirmed = -1;
+  if (pred == -1) {
+    debounce_gesture = -1;
+    debounce_counter = 0;
+    no_confidence_frames++;
+    if (no_confidence_frames >= REST_FALLBACK_FRAMES && last_emitted != REST_CLASS_INDEX) {
+      emit_gesture(REST_CLASS_INDEX, "fallback: no confident class");
     }
-  }
-
-  // Debouncing: Require DEBOUNCE_FRAMES consecutive identical predictions
-  if (this_predict != -1) {
-    if (this_predict == debounce_gesture) {
-      // Same gesture as last frame, increment counter
+  } else {
+    no_confidence_frames = 0;
+    if (pred == debounce_gesture) {
       debounce_counter++;
-      if (debounce_counter >= DEBOUNCE_FRAMES) {
-        // Gesture is stable across required frames, confirm it
-        confirmed_gesture = this_predict;
-      }
     } else {
-      // Different gesture detected, reset debounce counter
-      debounce_gesture = this_predict;
+      debounce_gesture = pred;
       debounce_counter = 1;
-      confirmed_gesture = -1;  // Not yet confirmed
     }
-    // Only use confirmed stable gestures
-    this_predict = confirmed_gesture;
+    if (debounce_counter >= DEBOUNCE_FRAMES) confirmed = pred;
   }
+  if (confirmed == -1) return;
 
-  // Gesture names
-  const char* gesture_names[] = {"Rest", "Fist", "Open", "Point", "Victory",
-                                  "OK", "ThumbUp", "ThumbDn", "Grasp", "Pinch", "WristFlex"};
+  // ---- motion lock ----
+  unsigned long now = millis();
+  bool in_lock = (now - last_movement_time) < MOTION_LOCK_MS;
 
-  // Motion Locking: Prevent rapid re-detection with cooldown period
-  unsigned long current_time = millis();
-  bool in_lock_period = (current_time - last_gesture_time) < MOTION_LOCK_MS;
-  bool is_rest = (this_predict == 0);  // Rest (class 0) always overrides lock
+  if (confirmed == REST_CLASS_INDEX) {
+    if (last_emitted != REST_CLASS_INDEX) emit_gesture(REST_CLASS_INDEX, "confirmed");
+    return;                                    // REST bypasses and never starts a lock
+  }
+  if (in_lock) {
+    Serial.printf("  [LOCKED %lu ms] %s ignored\n",
+                  MOTION_LOCK_MS - (now - last_movement_time), GESTURE_NAMES[confirmed]);
+    return;
+  }
+  if (confirmed != last_emitted) emit_gesture(confirmed, "confirmed");
 
-  if (this_predict != -1) {
-    // Check if we're in lock period (Rest gesture always bypasses lock)
-    if (!in_lock_period || is_rest) {
-      // Only output if gesture changed from last prediction
-      if (this_predict != last_predict) {
-        Serial.print("GESTURE DETECTED: ");
-        Serial.println(gesture_names[this_predict]);
-
-        // Debug: Show debouncing info
-        Serial.print("  [Debounced: ");
-        Serial.print(debounce_counter);
-        Serial.print("/");
-        Serial.print(DEBOUNCE_FRAMES);
-        Serial.println(" frames]");
-
-        // Trigger servo movement for detected gesture
-        servoController.moveToGesture(this_predict);
-
-        last_predict = this_predict;
-
-        // Start lock period (except for Rest gesture)
-        if (!is_rest) {
-          last_gesture_time = current_time;
-        }
-      }
-    } else {
-      // In lock period, ignore new predictions
-      Serial.print("  [LOCKED: Ignoring prediction for ");
-      Serial.print(MOTION_LOCK_MS - (current_time - last_gesture_time));
-      Serial.println("ms]");
-    }
+  static uint32_t last_stats_ms = 0;
+  if (now - last_stats_ms > 10000) {
+    SamplingStats st = sampling_stats();
+    Serial.printf("  [sampler] samples=%lu overruns=%lu max_cb=%lu us\n",
+                  (unsigned long)st.samples_total, (unsigned long)st.overruns, (unsigned long)st.max_callback_us);
+    last_stats_ms = now;
   }
 }

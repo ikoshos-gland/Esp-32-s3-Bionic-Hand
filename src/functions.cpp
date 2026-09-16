@@ -1,341 +1,180 @@
 /*
- * TD4 Feature Extraction for ESP32-S3 Bionic Hand
- * =================================================
+ * TD4 Feature Extraction + continuous sampling for ESP32-S3 Bionic Hand
+ * =====================================================================
  *
- * REFACTORED: Now processes RAW signals with DC offset removal
- * (Previously used RMS preprocessing which broke ZC/SSC features)
+ * Sampling: an esp_timer fires every 1000 us (ESP_TIMER_TASK dispatch), reads
+ * the six ADC channels, runs the per-sensor IIR filter cascade and writes the
+ * filtered bipolar sample into a ring buffer. Sampling never stops, so the
+ * filter states stay continuous across inference, serial printing and servo
+ * motion. prelim_collection() only waits for INFERENCE_HOP new samples and
+ * snapshots the newest RAW_WINDOW_SIZE samples.
  *
- * Implements Hudgins' TD4 (Time-Domain 4) features - Literature-validated
- * "Gold Standard" for EMG pattern recognition.
+ * Features (per sensor, on the DC-removed window): MAV, WL, ZC, SSC.
+ * Normalisation must match scripts_ai/critical/feature_extraction.py exactly:
+ *   MAV / 4095,  WL / (4095 * N),  ZC / N,  SSC / N
  *
- * Features (per EMG sensor):
- * - MAV (Mean Absolute Value): Average signal amplitude
- * - WL (Waveform Length): Signal complexity measure
- * - ZC (Zero Crossings): Frequency estimate
- * - SSC (Slope Sign Changes): Frequency content indicator
- *
- * Total: 4 features × 6 EMG sensors = 24 features
- *
- * CRITICAL CHANGES:
- * 1. RAW ADC data collection (not RMS windows)
- * 2. DC offset removal (centering signal at 0)
- * 3. ZC/SSC calculated on centered bipolar signals
- * 4. Thresholds in ADC units (not normalized)
- * 5. Global normalization (not per-window)
- *
- * WARNING: Model must be RETRAINED with updated Python pipeline!
- *
- * References:
- * - Hudgins et al. (1993): "A New Strategy for Multifunction Myoelectric Control"
- * - Phinyomark et al. (2012): "Feature Reduction and Selection for EMG Signal Classification"
+ * References: Hudgins et al. 1993; Phinyomark et al. 2012.
  */
 
 #include "functions.h"
 #include "filters.h"
 #include <Arduino.h>
 #include <cmath>
+#include "esp_timer.h"
 
-// Forward declaration of servo controller (only for real-time inference mode)
-#ifdef REAL_TIME_INFERENCE_MODE
-#include "servo_controller.h"
-extern ServoController servoController;
-#endif
+// ============================================================================
+// RING BUFFER (written by the sampler task, read by the main loop)
+// ============================================================================
+static float    ring[NUM_SENSORS][RING_SIZE];
+static volatile uint32_t write_count = 0;     // total samples written
+static uint32_t last_window_end = 0;          // write_count at the last snapshot
+static SamplingStats stats = {0, 0, 0};
+static esp_timer_handle_t sampler_handle = nullptr;
 
-// TD4 thresholds in ADC units (NOT normalized values)
-// CHANGED: Using ADC units for raw signal processing (was 0.01 for normalized RMS)
-#define ZC_THRESHOLD_ADC  15.0f   // ADC units - reduces noise-induced crossings
-#define SSC_THRESHOLD_ADC 15.0f   // ADC units - reduces noise sensitivity
+static const int sensor_pins[NUM_SENSORS] = {pin_MW1, pin_MW2, pin_MW3, pin_MW4, pin_MW5, pin_MW6};
 
-// Raw signal buffers for 6 EMG sensors (RAW_WINDOW_SIZE samples each)
-// CHANGED: Storing raw ADC values instead of RMS windows
-// THREAD SAFETY: Static ensures single instance, prevents multi-core race conditions
+// Snapshot of the newest window and the feature output
 static float raw_sensor_data[NUM_SENSORS][RAW_WINDOW_SIZE];
+static float features[NUM_FEATURES];
 
-// Feature output array (24 features total)
-float features[NUM_FEATURES];
-
-
-// =============================================================================
-// TD4 FEATURE EXTRACTION FUNCTIONS
-// =============================================================================
-
-/**
- * MAV: Mean Absolute Value
- *
- * MAV = (1/N) × Σ|x[i]|
- *
- * Represents the average amplitude of the signal.
- * Most commonly used EMG feature in literature.
- *
- * @param data Input signal array
- * @param len Array length
- * @return MAV feature value
- */
-float compute_mav(float data[], int len) {
-  float sum = 0.0;
-  for (int i = 0; i < len; i++) {
-    sum += fabs(data[i]);
+// ============================================================================
+// SAMPLER
+// ============================================================================
+static void sampler_callback(void*) {
+  uint32_t t0 = micros();
+  uint32_t idx = write_count & (RING_SIZE - 1);
+  for (int s = 0; s < NUM_SENSORS; s++) {
+    float raw = (float)analogRead(sensor_pins[s]);
+    ring[s][idx] = filter_sample(s, raw);
   }
+  write_count = write_count + 1;   // single writer; readers only compare counts
+  uint32_t dt = micros() - t0;
+  if (dt > stats.max_callback_us) stats.max_callback_us = dt;
+  stats.samples_total = write_count;
+}
+
+void sampling_start() {
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);   // ~0-3.1 V full scale on ESP32-S3
+  for (int s = 0; s < NUM_SENSORS; s++) {
+    pinMode(sensor_pins[s], INPUT);
+    (void)analogRead(sensor_pins[s]);   // one-time ADC init outside the timer task
+  }
+  filters_init();
+
+  esp_timer_create_args_t args = {};
+  args.callback = &sampler_callback;
+  args.arg = nullptr;
+  args.dispatch_method = ESP_TIMER_TASK;
+  args.name = "emg_sampler";
+  if (esp_timer_create(&args, &sampler_handle) != ESP_OK) {
+    Serial.println("FATAL: esp_timer_create failed");
+    while (true) { delay(1000); Serial.print("."); }
+  }
+  write_count = 0;
+  last_window_end = 0;
+  esp_timer_start_periodic(sampler_handle, SAMPLE_PERIOD_US);
+  Serial.printf("Sampler started: %d Hz, window %d, hop %d, ring %d\n",
+                SAMPLING_FREQ, RAW_WINDOW_SIZE, INFERENCE_HOP, RING_SIZE);
+}
+
+SamplingStats sampling_stats() { return stats; }
+
+// ============================================================================
+// TD4 PRIMITIVES (single implementation)
+// ============================================================================
+float compute_mav(const float data[], int len) {
+  float sum = 0.0f;
+  for (int i = 0; i < len; i++) sum += fabsf(data[i]);
   return sum / len;
 }
 
-/**
- * WL: Waveform Length
- *
- * WL = Σ|x[i+1] - x[i]|
- *
- * Measures the complexity of the EMG signal.
- * Related to signal frequency content and amplitude.
- *
- * @param data Input signal array
- * @param len Array length
- * @return WL feature value
- */
-float compute_wl(float data[], int len) {
-  float wl = 0.0;
-  for (int i = 1; i < len; i++) {
-    wl += fabs(data[i] - data[i-1]);
-  }
+float compute_wl(const float data[], int len) {
+  float wl = 0.0f;
+  for (int i = 1; i < len; i++) wl += fabsf(data[i] - data[i - 1]);
   return wl;
 }
 
-/**
- * ZC: Zero Crossings
- *
- * ZC = Σ sgn(x[i] × x[i+1] < -threshold)
- *
- * Counts the number of times the signal crosses zero.
- * Provides approximate measure of frequency content.
- * Threshold reduces noise-induced crossings.
- *
- * IMPORTANT: Implementation matches Python exactly:
- * - Count crossings where product is negative
- * - AND absolute difference exceeds threshold
- *
- * @param data Input signal array (normalized)
- * @param len Array length
- * @param threshold Minimum difference for valid crossing
- * @return ZC count
- */
-int compute_zc(float data[], int len, float threshold) {
-  int zc_count = 0;
-
+// Sign test on the centered signal, difference on the RAW samples:
+// (x_i - m) - (x_j - m) == x_i - x_j exactly, and integer differences are exact
+// in float, so threshold ties are decided like in Python.
+// Python: zc = sum((c[:-1]*c[1:] < 0) & (|x[:-1]-x[1:]| >= threshold))
+int compute_zc(const float centered[], const float raw[], int len, float threshold) {
+  int count = 0;
   for (int i = 0; i < len - 1; i++) {
-    float product = data[i] * data[i+1];
-    float diff = fabs(data[i] - data[i+1]);
-
-    // Count crossing if product is negative AND difference exceeds threshold
-    if (product < 0 && diff >= threshold) {
-      zc_count++;
-    }
+    float product = centered[i] * centered[i + 1];
+    float diff = fabsf(raw[i] - raw[i + 1]);
+    if (product < 0.0f && diff >= threshold) count++;
   }
-
-  return zc_count;
+  return count;
 }
 
-/**
- * SSC: Slope Sign Changes
- *
- * SSC = Σ sgn((x[i] - x[i-1]) × (x[i] - x[i+1]) > threshold)
- *
- * Counts the number of times the signal slope changes sign.
- * Related to signal frequency content.
- * Threshold reduces noise sensitivity.
- *
- * IMPORTANT: Implementation matches Python exactly:
- * - Calculate left_slope = x[i] - x[i-1]
- * - Calculate right_slope = x[i] - x[i+1]
- * - Count where product >= threshold
- *
- * @param data Input signal array (normalized)
- * @param len Array length
- * @param threshold Minimum product for valid sign change
- * @return SSC count
- */
-int compute_ssc(float data[], int len, float threshold) {
+// Python: ssc = sum(((x[i]-x[i-1]) * (x[i]-x[i+1])) >= threshold)  (raw samples)
+int compute_ssc(const float raw[], int len, float threshold) {
   if (len < 3) return 0;
-
-  int ssc_count = 0;
-
+  int count = 0;
   for (int i = 1; i < len - 1; i++) {
-    float left_slope = data[i] - data[i-1];
-    float right_slope = data[i] - data[i+1];
-    float product = left_slope * right_slope;
-
-    // Count sign change if product >= threshold
-    if (product >= threshold) {
-      ssc_count++;
-    }
+    float left  = raw[i] - raw[i - 1];
+    float right = raw[i] - raw[i + 1];
+    if (left * right >= threshold) count++;
   }
-
-  return ssc_count;
+  return count;
 }
 
-
-// =============================================================================
-// DATA COLLECTION PIPELINE
-// =============================================================================
-
-/**
- * Collect raw EMG data from 6 sensors
- *
- * REFACTORED Process:
- * 1. Collect RAW_WINDOW_SIZE samples (250ms at 1000Hz = 250 samples per sensor)
- * 2. Store in raw_sensor_data buffers (no RMS preprocessing)
- * 3. Pass to feature extraction
- *
- * CHANGED: No longer uses RMS windows - collects raw ADC values directly
- * FIXED: Reduced from 500 samples @ 2kHz to 250 samples @ 1kHz (matches documentation)
- *
- * @return Pointer to feature array (after full pipeline)
- */
+// ============================================================================
+// WINDOW ACQUISITION
+// ============================================================================
 float* prelim_collection() {
-  unsigned long next_sample_time = micros();
-  
-  // Collect RAW_WINDOW_SIZE raw samples from all 6 sensors
-  for (int i = 0; i < RAW_WINDOW_SIZE; i++) {
-    // Read raw ADC values (0-4095 on ESP32 12-bit ADC) and apply DSP filters
-    // CRITICAL: HPF creates BIPOLAR signals (can be negative after DC removal)
-    // Solution: Store as float directly (raw_sensor_data[][] is float, not uint16_t)
-    // DC offset removal in extract_features_from_raw() handles bipolar signals correctly
+  // Wait for INFERENCE_HOP new samples (first call waits for a full window)
+  uint32_t need = (last_window_end == 0) ? RAW_WINDOW_SIZE : INFERENCE_HOP;
+  while ((uint32_t)(write_count - last_window_end) < need) {
+    if (sampling_idle_hook) sampling_idle_hook();
+    delayMicroseconds(200);
+  }
 
-    float filtered1 = filter_sample(0, (float)analogRead(pin_MW1));
-    float filtered2 = filter_sample(1, (float)analogRead(pin_MW2));
-    float filtered3 = filter_sample(2, (float)analogRead(pin_MW3));
-    float filtered4 = filter_sample(3, (float)analogRead(pin_MW4));
-    float filtered5 = filter_sample(4, (float)analogRead(pin_MW5));
-    float filtered6 = filter_sample(5, (float)analogRead(pin_MW6));
+  uint32_t end = write_count;                 // newest sample index (exclusive)
+  if ((uint32_t)(end - last_window_end) > (uint32_t)(RING_SIZE - RAW_WINDOW_SIZE)) {
+    stats.overruns++;                          // consumer fell behind, resync to newest
+  }
+  last_window_end = end;
 
-    // Store bipolar signals directly (NO encoding needed - buffer is float[])
-    // Negative values from HPF are preserved for correct ZC/SSC feature calculation
-    raw_sensor_data[0][i] = filtered1;
-    raw_sensor_data[1][i] = filtered2;
-    raw_sensor_data[2][i] = filtered3;
-    raw_sensor_data[3][i] = filtered4;
-    raw_sensor_data[4][i] = filtered5;
-    raw_sensor_data[5][i] = filtered6;
-
-    // Update servos every 10 samples (~10ms interval) for smooth motion
-    #ifdef REAL_TIME_INFERENCE_MODE
-    if (i % 10 == 0) {
-      servoController.update();
-    }
-    #endif
-
-    // REMOVED: Watchdog reset (watchdog disabled in main.cpp setup)
-
-    // Maintain 1000Hz sampling rate (1000 microseconds = 1ms per sample) - FIXED from 2000Hz
-    next_sample_time += 1000;
-    while (micros() < next_sample_time) {
-      delayMicroseconds(10);
+  uint32_t start = end - RAW_WINDOW_SIZE;
+  for (int s = 0; s < NUM_SENSORS; s++) {
+    for (int i = 0; i < RAW_WINDOW_SIZE; i++) {
+      raw_sensor_data[s][i] = ring[s][(start + i) & (RING_SIZE - 1)];
     }
   }
-  
-  // Extract features from raw signals
   return extract_features_from_raw();
 }
 
-
-/**
- * Extract TD4 features from raw ADC signals
- *
- * REFACTORED to process RAW signals correctly:
- * 1. Calculate DC offset (mean) for each sensor
- * 2. Center signal by subtracting mean (creates bipolar signal)
- * 3. Calculate TD4 features on centered signal
- * 4. Apply GLOBAL normalization (not per-window)
- *
- * This fixes the Zero Crossing and Slope Sign Change features which
- * were previously always zero due to RMS preprocessing.
- *
- * @return Pointer to feature array (24 features)
- */
+// ============================================================================
+// FEATURE EXTRACTION (DC removal per window, then TD4, then global scaling)
+// ============================================================================
 float* extract_features_from_raw() {
+  static float centered[RAW_WINDOW_SIZE];
   int feat_idx = 0;
-  
-  // Process each sensor
+
   for (int s = 0; s < NUM_SENSORS; s++) {
-    float* data = raw_sensor_data[s];
-    
-    // STEP 1: Calculate DC offset (mean value)
+    const float* data = raw_sensor_data[s];
+
     float mean = 0.0f;
-    for (int i = 0; i < RAW_WINDOW_SIZE; i++) {
-      mean += data[i];
-    }
+    for (int i = 0; i < RAW_WINDOW_SIZE; i++) mean += data[i];
     mean /= RAW_WINDOW_SIZE;
-    
-    // STEP 2: Initialize feature accumulators
-    float mav = 0.0f;
-    float wl = 0.0f;
-    int zc = 0;
-    int ssc = 0;
-    
-    // STEP 3: Process centered signal (remove DC offset)
-    float prev_centered = data[0] - mean;
-    
-    for (int i = 0; i < RAW_WINDOW_SIZE; i++) {
-      float centered = data[i] - mean;  // Center at 0
-      
-      // MAV: Mean Absolute Value
-      mav += fabs(centered);
-      
-      // WL: Waveform Length
-      if (i > 0) {
-        wl += fabs(centered - prev_centered);
-      }
-      
-      // ZC: Zero Crossing (with threshold to avoid noise)
-      if (i > 0) {
-        // Check if sign changed AND difference is significant
-        if ((centered > 0 && prev_centered < 0) ||
-            (centered < 0 && prev_centered > 0)) {
-          if (fabs(centered - prev_centered) >= ZC_THRESHOLD_ADC) {
-            zc++;
-          }
-        }
-      }
-      
-      // SSC: Slope Sign Change
-      if (i > 0 && i < RAW_WINDOW_SIZE - 1) {
-        float next_centered = data[i+1] - mean;
-        float left_slope = centered - prev_centered;
-        float right_slope = centered - next_centered;
-        float product = left_slope * right_slope;
-        
-        if (product >= SSC_THRESHOLD_ADC) {
-          ssc++;
-        }
-      }
-      
-      prev_centered = centered;
-    }
-    
-    // STEP 4: Calculate final feature values
-    mav /= RAW_WINDOW_SIZE;
-    
-    // STEP 5: Apply GLOBAL normalization (using ADC range)
-    // This preserves amplitude differences between gestures
-    // (Unlike per-window normalization which destroyed this information)
-    mav = mav / ADC_MAX_GLOBAL;  // Normalize to [0,1]
-    wl = wl / (ADC_MAX_GLOBAL * RAW_WINDOW_SIZE);  // CRITICAL FIX: Must match Python (divides by 4095 × 250)
-    
-    // ZC and SSC are counts, optionally normalize if needed
-    // For now, keep as raw counts (model can learn appropriate scaling)
-    float zc_normalized = (float)zc / RAW_WINDOW_SIZE;  // Normalize to rate
-    float ssc_normalized = (float)ssc / RAW_WINDOW_SIZE;  // Normalize to rate
-    
-    // STEP 6: Store features (order MUST match Python training!)
-    features[feat_idx++] = mav;
-    features[feat_idx++] = wl;
-    features[feat_idx++] = zc_normalized;
-    features[feat_idx++] = ssc_normalized;
+    for (int i = 0; i < RAW_WINDOW_SIZE; i++) centered[i] = data[i] - mean;
+
+    float mav = compute_mav(centered, RAW_WINDOW_SIZE);
+    float wl  = compute_wl(data, RAW_WINDOW_SIZE);              // diffs identical to centered
+    int   zc  = compute_zc(centered, data, RAW_WINDOW_SIZE, ZC_THRESHOLD_ADC);
+    int   ssc = compute_ssc(data, RAW_WINDOW_SIZE, SSC_THRESHOLD_ADC);
+
+    features[feat_idx++] = mav / ADC_MAX_GLOBAL;
+    features[feat_idx++] = wl / (ADC_MAX_GLOBAL * RAW_WINDOW_SIZE);
+    features[feat_idx++] = (float)zc / RAW_WINDOW_SIZE;
+    features[feat_idx++] = (float)ssc / RAW_WINDOW_SIZE;
   }
-  
-  // Verify feature count
+
   if (feat_idx != NUM_FEATURES) {
-    Serial.println("ERROR: Feature count mismatch!");
-    Serial.printf("Expected %d features, extracted %d\n", NUM_FEATURES, feat_idx);
+    Serial.printf("ERROR: feature count mismatch, expected %d got %d\n", NUM_FEATURES, feat_idx);
   }
-  
   return features;
 }

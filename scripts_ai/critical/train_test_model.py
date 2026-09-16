@@ -23,6 +23,10 @@ References:
 Author: ESP32 Bionic Hand Project
 Date: 2025
 """
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # Windows console safety
+
 
 import tensorflow as tf
 from tensorflow import keras
@@ -31,11 +35,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+import sys
 import time
 from datetime import datetime
 from glob import glob
 from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.model_selection import train_test_split
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from export_model_header import export_headers
 
 
 # ============================================================================
@@ -59,6 +67,12 @@ DROPOUT_RATE_3 = 0.1
 
 # Early stopping
 EARLY_STOPPING_PATIENCE = 15
+
+# Physical limits of TD4 features after global normalisation: |centered| <= 2047.5
+# so MAV/4095 <= 0.5 and WL/(4095*N) <= 0.5. Anything above means corrupted data
+# (e.g. uint16 wrap-around of unencoded negative filter output).
+MAV_MAX_PHYSICAL = 0.5
+WL_MAX_PHYSICAL = 0.5
 
 # Output paths - Centralized training outputs
 # Get script directory to build absolute paths
@@ -108,13 +122,13 @@ def find_latest_features_npz():
     return latest
 
 
-def load_npz_features(npz_path, strict_gestures=False):
+def load_npz_features(npz_path, strict_gestures=True):
     """
     Load TD4 features from NPZ file
 
     Args:
         npz_path: Path to NPZ file
-        strict_gestures: If True, enforce GESTURE_NAMES_FIXED. If False, auto-detect from data (default: False)
+        strict_gestures: If True (default), enforce GESTURE_NAMES_FIXED. If False, auto-detect from data (research only)
 
     Returns:
         Tuple of (features, labels, feature_names, num_classes)
@@ -334,7 +348,45 @@ def prepare_data(features, labels, reps, num_classes):
 # MODEL ARCHITECTURE
 # ============================================================================
 
-def build_wide_deep_mlp(input_dim, num_classes):
+def validate_feature_ranges(features, feature_names):
+    """Return a list of problems; empty when the NPZ is plausible TD4 data."""
+    problems = []
+    for j, name in enumerate(feature_names):
+        col = features[:, j]
+        name = str(name)
+        if name.startswith('mav_') and col.max() > MAV_MAX_PHYSICAL:
+            problems.append(f"{name}: max {col.max():.3f} > {MAV_MAX_PHYSICAL} (uint16 overflow in the CSV?)")
+        if name.startswith('wl_') and col.max() > WL_MAX_PHYSICAL:
+            problems.append(f"{name}: max {col.max():.3f} > {WL_MAX_PHYSICAL}")
+        if not np.isfinite(col).all():
+            problems.append(f"{name}: contains NaN/Inf")
+        if col.std() == 0:
+            problems.append(f"{name}: constant column (dead sensor or broken extraction)")
+    return problems
+
+
+def leave_one_rep_out_cv(features, labels_int, reps, num_classes, input_dim, epochs=60):
+    """Leave-one-rep-out CV with the same architecture; returns per-fold accuracies."""
+    accs = []
+    folds = [r for r in sorted(np.unique(reps)) if r > 0]
+    for r in folds:
+        test = reps == r
+        if test.sum() == 0:
+            continue
+        m = compile_model(build_wide_deep_mlp(input_dim, num_classes, verbose=False))
+        m.fit(features[~test], keras.utils.to_categorical(labels_int[~test], num_classes),
+              epochs=epochs, batch_size=BATCH_SIZE, verbose=0)
+        pred = np.argmax(m.predict(features[test], verbose=0), axis=1)
+        acc = float(np.mean(pred == labels_int[test]))
+        accs.append(acc)
+        print(f"  LORO fold rep={r}: accuracy {acc:.3f}  (n={int(test.sum())})")
+    accs = np.array(accs)
+    if len(accs):
+        print(f"  LORO mean {accs.mean():.3f} +- {accs.std():.3f} over {len(accs)} folds")
+    return accs
+
+
+def build_wide_deep_mlp(input_dim, num_classes, verbose=True):
     """
     Build Wide & Deep MLP for EMG classification
 
@@ -397,12 +449,10 @@ def build_wide_deep_mlp(input_dim, num_classes):
         name='output'
     ))
 
-    print("Model architecture:")
-    model.summary()
-
-    # Calculate total parameters
-    total_params = model.count_params()
-    print(f"\nTotal parameters: {total_params:,}")
+    if verbose:
+        print("Model architecture:")
+        model.summary()
+        print(f"\nTotal parameters: {model.count_params():,}")
 
     return model
 
@@ -719,14 +769,15 @@ const unsigned int model_tflite_len = {len(tflite_data)};
 # MAIN PIPELINE
 # ============================================================================
 
-def main(num_sensors=6, npz_path=None, strict_gestures=False):
+def main(num_sensors=6, npz_path=None, strict_gestures=True, loro_cv=False):
     """
     Main training pipeline
 
     Args:
         num_sensors: Number of EMG sensors (default: 6)
         npz_path: Path to NPZ file (default: auto-find latest)
-        strict_gestures: Enforce GESTURE_NAMES_FIXED (default: False, auto-detect from data)
+        strict_gestures: Enforce GESTURE_NAMES_FIXED (default: True). Auto-detect only with --allow-auto-order
+        loro_cv: also run leave-one-rep-out cross-validation before the final fit
     """
     print("\n" + "="*80)
     print("ESP32-S3 Bionic Hand - Wide & Deep MLP Training".center(80))
@@ -752,6 +803,14 @@ def main(num_sensors=6, npz_path=None, strict_gestures=False):
 
     features, labels, reps, feature_names, num_classes = load_npz_features(npz_path, strict_gestures=strict_gestures)
 
+    problems = validate_feature_ranges(features, feature_names)
+    if problems:
+        print("\nERROR: training features are not physically plausible:")
+        for pr in problems[:12]:
+            print("   - " + pr)
+        print("   Re-record with the current firmware (bipolar encoding) and re-extract. Aborting.")
+        return
+
     # Verify feature count (4 TD4 features per sensor)
     expected_features = 4 * num_sensors
     if features.shape[1] != expected_features:
@@ -760,6 +819,14 @@ def main(num_sensors=6, npz_path=None, strict_gestures=False):
         print(f"   Or specify correct sensor count with --sensors argument")
 
     # Prepare data using rep-based splitting
+    if loro_cv:
+        print(f"\n{'='*80}")
+        print("Leave-one-rep-out cross-validation (leakage-free estimate)")
+        print(f"{'='*80}")
+        label_map_cv = {label: idx for idx, label in enumerate(GESTURE_NAMES)}
+        labels_int_cv = np.array([label_map_cv[l] for l in labels])
+        leave_one_rep_out_cv(features, labels_int_cv, reps, num_classes, features.shape[1])
+
     X_train, X_val, X_test, y_train, y_val, y_test = prepare_data(
         features, labels, reps, num_classes
     )
@@ -807,8 +874,15 @@ def main(num_sensors=6, npz_path=None, strict_gestures=False):
     model_size_kb = convert_to_tflite_float32(model, tflite_path)
 
     # Convert to C header
-    header_path = os.path.join(MODELS_DIR, f'mlp_td4_{timestamp}_float32.h')
-    convert_to_c_header(tflite_path, header_path, num_sensors, features.shape[1])
+    header_dir = os.path.join(MODELS_DIR, f'mlp_td4_{timestamp}_headers')
+    export_headers(
+        tflite_path, list(GESTURE_NAMES), 'Rest', features.shape[1], header_dir,
+        training_data=os.path.basename(npz_path),
+        note=f"test_acc={metrics['accuracy']:.4f}; rep-based split; TD4 {num_sensors} sensors",
+        accuracy=float(metrics['accuracy']),
+        feature_ranges={'mav_max': float(features[:, 0::4].max()), 'wl_max': float(features[:, 1::4].max())},
+        description=f"TD4 MLP 256-128-64 float32, {num_sensors} sensors, trained {timestamp}")
+    header_path = os.path.join(header_dir, 'model.h')
 
     # Final summary
     print(f"\n{'='*80}")
@@ -827,10 +901,9 @@ def main(num_sensors=6, npz_path=None, strict_gestures=False):
     print(f"  4. Training plots:  {PLOTS_DIR}")
 
     print(f"\nNext Steps:")
-    print(f"  1. Copy {os.path.basename(header_path)} to src/")
-    print(f"  2. Update ESP32-S3 code to use TD4 features")
-    print(f"  3. Ensure feature extraction matches training (MAV, WL, ZC, SSC)")
-    print(f"  4. Upload and test on hardware")
+    print(f"  1. Copy {header_dir}/model.h AND model_meta.h to include/")
+    print(f"  2. pio run -e real_time_inference  (static_asserts check feature count and class order)")
+    print(f"  3. Upload and test on hardware")
 
     print(f"\n{'='*80}\n")
 
@@ -874,15 +947,25 @@ Examples:
     parser.add_argument(
         '--strict',
         action='store_true',
-        help='Enforce GESTURE_NAMES_FIXED matching (for ESP32 deployment). Default: auto-detect gestures from data.'
+        help='(default behaviour, kept for compatibility) enforce GESTURE_NAMES_FIXED'
     )
-
+    parser.add_argument(
+        '--allow-auto-order',
+        action='store_true',
+        help='RESEARCH ONLY: take class names from the data in sorted order. model_meta.h then carries '
+             'that order; the servo pose table assumes the fixed order.'
+    )
+    parser.add_argument(
+        '--cv',
+        action='store_true',
+        help='Run leave-one-rep-out cross-validation before the final fit (slower, leakage-free estimate)'
+    )
     args = parser.parse_args()
+    strict = not args.allow_auto_order
 
     print(f"\nTraining with {args.sensors} EMG sensors ({4 * args.sensors} TD4 features)")
-    if args.strict:
-        print(f"Gesture mode: STRICT (enforcing GESTURE_NAMES_FIXED)")
+    if strict:
+        print(f"Gesture mode: STRICT (enforcing GESTURE_NAMES_FIXED, matches firmware)")
     else:
-        print(f"Gesture mode: AUTO-DETECT (using gestures from data)")
-
-    main(num_sensors=args.sensors, npz_path=args.npz, strict_gestures=args.strict)
+        print(f"Gesture mode: AUTO-DETECT (research only, order taken from data)")
+    main(num_sensors=args.sensors, npz_path=args.npz, strict_gestures=strict, loro_cv=args.cv)

@@ -29,7 +29,7 @@ python scripts_ai/critical/feature_extraction.py path/to/training_data.csv
 
 ### Adım 3: Model Eğitimi (Train & Test)
 ```bash
-python scripts_ai/critical/train_test_model.py
+python scripts_ai/critical/train_test_model.py --cv
 ```
 **Çıktı:** 
 - `data/models/emg_model_YYYYMMDD_HHMMSS.tflite` (ESP32 için)

@@ -52,10 +52,10 @@ Bu proje, **6 MyoWare EMG sensörü** kullanarak kas hareketlerini algılayan ve
 
 | Metrik | Değer |
 |--------|-------|
-| **Accuracy** | 85-95% (literatür bazlı TD4 features) |
+| **Accuracy** | henüz ölçülmedi (temiz 11 sınıflı veri yok; eski modeller bozuk veriyle eğitildi, bkz. AUDIT_CHANGES.md) |
 | **Inference Time** | < 20ms (ESP32-S3 @ 240MHz) |
 | **Response Time** | ~282ms (250ms collection + 12ms DSP + 20ms inference) |
-| **Model Size** | ~120 KB (Int8 quantized TFLite) |
+| **Model Size** | 191 KB (Float32 TFLite, 48.267 parametre) |
 | **Memory Usage** | ~30 KB tensor arena + ~2 KB buffers |
 
 ---
@@ -65,7 +65,7 @@ Bu proje, **6 MyoWare EMG sensörü** kullanarak kas hareketlerini algılayan ve
 ### 🧠 Makine Öğrenimi
 - **TensorFlow Lite Micro** - ESP32 üzerinde edge ML
 - **Wide & Deep MLP** mimarisi (256→128→64 neurons)
-- **Int8 quantization** (75% boyut azaltma, 2-3× hızlanma)
+- **Float32 TFLite** (TFLite Micro v2.1.1 uyumluluğu; Int8 henüz yok)
 - **TD4 feature set** (literatür standardı - Hudgins et al. 1993)
 
 ### 🔊 DSP Sinyal İşleme
@@ -85,7 +85,7 @@ Bu proje, **6 MyoWare EMG sensörü** kullanarak kas hareketlerini algılayan ve
 
 ### ⚡ Real-Time Performance
 - **1000 Hz sampling** (real-time inference)
-- **2000 Hz sampling** (data acquisition)
+- **1000 Hz sampling** (data acquisition, inference ile aynı)
 - **250ms sliding window** (125ms overlap)
 - **< 300ms total latency** (collection + DSP + inference)
 
@@ -413,7 +413,7 @@ real_time_esp322/
 ```mermaid
 graph TB
     subgraph "1. VERİ TOPLAMA"
-        A1[ESP32: data_acquisition] -->|Serial 2000Hz| A2[Python GUI]
+        A1[ESP32: data_acquisition] -->|Serial 1000Hz| A2[Python GUI]
         A2 -->|CSV| A3[training_data.csv]
     end
     
@@ -509,7 +509,7 @@ python feature_extraction.py ../../data/training_data_YYYYMMDD.csv
 
 ```bash
 cd scripts_ai/critical
-python train_test_model.py
+python train_test_model.py            # sabit sınıf sırası varsayılan; --cv ile LORO CV
 
 # Çıktı: 
 #   scripts_ai/data/models/emg_model_YYYYMMDD_HHMMSS.tflite
@@ -518,7 +518,7 @@ python train_test_model.py
 
 **Model:**
 - Wide & Deep MLP (256→128→64)
-- Int8 quantization
+- Float32 TFLite (Int8 yok)
 - 11 gesture sınıfı
 - ~120 KB boyut
 
@@ -650,7 +650,7 @@ SRAM (512 KB):
 
 | Metrik | Real-Time | Data Acquisition |
 |--------|-----------|------------------|
-| **Sampling Rate** | 1000 Hz | 2000 Hz |
+| **Sampling Rate** | 1000 Hz | 1000 Hz |
 | **Window Size** | 250 samples | 500 samples |
 | **Collection Time** | 250 ms | 250 ms |
 | **DSP Latency** | ~12 ms | ~12 ms |
@@ -698,7 +698,7 @@ filtered_value = constrain(filtered_value, 0, 4095);
 ```bash
 # TFLite model yeniden oluştur
 cd scripts_ai/critical
-python train_test_model.py
+python train_test_model.py            # sabit sınıf sırası varsayılan; --cv ile LORO CV
 
 # En son model.h'ı kopyala
 cp ../data/models/emg_model_*.h ../../src/model.h

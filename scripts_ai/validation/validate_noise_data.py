@@ -10,6 +10,10 @@ This script analyzes EMG CSV data to check for:
 Author: ESP32 Bionic Hand Project
 Date: 2025
 """
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # Windows console safety
+
 
 import pandas as pd
 import numpy as np
